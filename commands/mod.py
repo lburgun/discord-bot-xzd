@@ -133,17 +133,32 @@ class Moderation(commands.Cog):
         )
         status_msg = await ctx.send(embed=embed_loading)
 
-        def is_recent(msg):
-            return (discord.utils.utcnow() - msg.created_at).days < 14
+        now = discord.utils.utcnow()
 
-        deleted = await ctx.channel.purge(
+        # 🔹 Étape 1 : suppression rapide (<14 jours)
+        def is_recent(msg):
+            return (now - msg.created_at).days < 14
+
+        recent_deleted = await ctx.channel.purge(
             limit=amount + 1,
             check=is_recent,
             bulk=True
         )
 
+        # 🔹 Étape 2 : suppression lente (>14 jours)
+        old_deleted_count = 0
+        async for msg in ctx.channel.history(limit=amount + 20):
+            if (now - msg.created_at).days >= 14:
+                try:
+                    await msg.delete()
+                    old_deleted_count += 1
+                except:
+                    pass
+
+        total_deleted = (len(recent_deleted) - 1) + old_deleted_count
+
         embed_done = discord.Embed(
-            description=f"✅ **{len(deleted)-1}** messages supprimés.",
+            description=f"✅ **{total_deleted}** messages supprimés.",
             color=0x2b2d31
         )
 
