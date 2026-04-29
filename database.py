@@ -1,9 +1,16 @@
-import sqlite3
-import json
+import os
 from typing import Optional, Dict, List, Union
 from datetime import datetime
+from pymongo import MongoClient, UpdateOne
+from dotenv import load_dotenv
 
-DB_NAME = "economy.db"
+load_dotenv()
+
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://leointernet90_db_user:UyBjcI1iTATaTjbB@cluster0.b0zapmd.mongodb.net/?appName=Cluster0")
+DB_NAME = os.getenv("MONGO_DB_NAME", "discord_bot")
+
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
 
 # ---- CONSTANTES ----
 EMPLOYEE_ROLES = {
@@ -124,446 +131,546 @@ BUILDING_TYPES = {
     }
 }
 
-def get_conn():
-    return sqlite3.connect(
-        DB_NAME,
-        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        isolation_level=None,
-        timeout=10,
-        check_same_thread=False
-    )
-
 def init_db():
-    """Initialise la base de données avec toutes les tables nécessaires"""
-    with get_conn() as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
-        
-        # Table users
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                guild_id TEXT,
-                user_id TEXT,
-                wallet INTEGER DEFAULT 0,
-                bank INTEGER DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
+    """Initialise la base de données MongoDB (crée des index si nécessaire)"""
+    # Index pour les utilisateurs
+    db.users.create_index([("guild_id", 1), ("user_id", 1)], unique=True)
+    # Index pour l'inventaire
+    db.inventaire.create_index([("guild_id", 1), ("user_id", 1)], unique=True)
+    # Index pour les jobs
+    db.jobs.create_index([("guild_id", 1), ("user_id", 1)], unique=True)
+    # Index pour les entreprises
+    db.entreprises.create_index([("guild_id", 1), ("owner_id", 1)], unique=True)
+    db.entreprises.create_index([("guild_id", 1), ("nom", 1)])
+    # Index pour les employés
+    db.entreprise_employes.create_index([("guild_id", 1), ("entreprise_owner_id", 1), ("employe_id", 1)], unique=True)
+    db.entreprise_employes.create_index([("guild_id", 1), ("employe_id", 1)])
+    # Index pour les bâtiments
+    db.entreprise_buildings.create_index([("guild_id", 1), ("entreprise_owner_id", 1), ("building_id", 1)], unique=True)
+    # Index pour le marketplace
+    db.marketplace_listings.create_index([("guild_id", 1), ("listing_id", 1)], unique=True)
+    db.marketplace_listings.create_index([("status", 1), ("expires_at", 1)])
+    # Index pour les warnings
+    db.warnings.create_index([("guild_id", 1), ("user_id", 1)])
+    # Index pour les tickets
+    db.tickets.create_index([("channel_id", 1)], unique=True)
+    # Index pour les configs
+    db.guild_config.create_index([("guild_id", 1)], unique=True)
+    # Index pour les permissions
+    db.command_permissions.create_index([("guild_id", 1), ("command_name", 1), ("role_id", 1)], unique=True)
 
-        # Table user_items (utilisée par marketplace et phone)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_items (
-                user_id INTEGER,
-                item_name TEXT,
-                quantity INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, item_name)
-            )
-        """)
+# ---- BRIDGE SQL-TO-MONGO POUR COMPATIBILITÉ ----
+import re
 
-        # Table inventaire (utilisée par d'autres modules)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS inventaire (
-                guild_id TEXT,
-                user_id TEXT,
-                inventory TEXT DEFAULT '{}',
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
+def parse_sql_where(where_clause: str, params: tuple) -> dict:
+    if not where_clause: return {}
+    # Simplification extrême des clauses WHERE
+    # On gère "col1 = ? AND col2 = ?"
+    parts = re.split(r'\s+AND\s+', where_clause, flags=re.IGNORECASE)
+    query = {}
+    param_idx = 0
+    for part in parts:
+        match = re.match(r'(\w+)\s*(=|!=|>|<|>=|<=|IN|LIKE)\s*\?', part.strip(), re.IGNORECASE)
+        if match:
+            col, op = match.groups()
+            val = params[param_idx]
+            param_idx += 1
+            if op == '=': query[col] = val
+            elif op == '!=': query[col] = {"$ne": val}
+            elif op == '>': query[col] = {"$gt": val}
+            elif op == '<': query[col] = {"$lt": val}
+            elif op == '>=': query[col] = {"$gte": val}
+            elif op == '<=': query[col] = {"$lte": val}
+        else:
+            # Cas sans ? (ex: status = 'active')
+            match_lit = re.match(r"(\w+)\s*(=|!=)\s*'([^']+)'", part.strip(), re.IGNORECASE)
+            if match_lit:
+                col, op, val = match_lit.groups()
+                if op == '=': query[col] = val
+                elif op == '!=': query[col] = {"$ne": val}
+    return query
 
-        # Table jobs
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                guild_id TEXT,
-                user_id TEXT,
-                current_job TEXT,
-                knowledge INTEGER DEFAULT 0,
-                unlocked_jobs TEXT DEFAULT '[]',
-                work_count INTEGER DEFAULT 0,
-                last_work TEXT DEFAULT NULL,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
+def get_next_sequence_value(sequence_name):
+    result = db.counters.find_one_and_update(
+        {"_id": sequence_name},
+        {"$inc": {"sequence_value": 1}},
+        upsert=True,
+        return_document=True
+    )
+    return result["sequence_value"]
 
-        # Table investissements
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS investissements (
-                guild_id TEXT,
-                user_id TEXT,
-                nom_invest TEXT,
-                duration INTEGER,
-                reward INTEGER,
-                start TEXT,
-                end TEXT,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-
-        # Table entreprises
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS entreprises (
-                guild_id TEXT,
-                owner_id TEXT,
-                nom TEXT DEFAULT 'Entreprise sans nom',
-                tresorerie INTEGER DEFAULT 0,
-                tresorerie_max INTEGER DEFAULT 1000,
-                nb_work_requis INTEGER DEFAULT 9,
-                nb_work_restants INTEGER DEFAULT 9,
-                visibilite TEXT DEFAULT 'publique',
-                revenu_par_cycle INTEGER DEFAULT 1000,
-                last_rename TEXT DEFAULT NULL,
-                PRIMARY KEY (guild_id, owner_id)
-            )
-        """)
-
-        # Table entreprise_employes
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS entreprise_employes (
-                guild_id TEXT,
-                entreprise_owner_id TEXT,
-                employe_id TEXT,
-                role TEXT DEFAULT 'employe',
-                salaire INTEGER DEFAULT 500,
-                nb_work_effectues INTEGER DEFAULT 0,
-                PRIMARY KEY (guild_id, entreprise_owner_id, employe_id)
-            )
-        """)
-
-        # Table entreprise_buildings
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS entreprise_buildings (
-                guild_id TEXT,
-                entreprise_owner_id TEXT,
-                building_type TEXT,
-                level INTEGER DEFAULT 1,
-                last_maintenance TEXT,
-                building_id INTEGER,
-                PRIMARY KEY (guild_id, entreprise_owner_id, building_id)
-            )
-        """)
-
-        # Table marketplace_listings
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS marketplace_listings (
-                guild_id TEXT NOT NULL,
-                listing_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                seller_id TEXT NOT NULL,
-                item_name TEXT NOT NULL,
-                quantity INTEGER NOT NULL CHECK (quantity > 0),
-                price_per_unit INTEGER NOT NULL CHECK (price_per_unit > 0),
-                description TEXT DEFAULT '',
-                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-                expires_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now', '+1 day')),
-                status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'sold', 'cancelled', 'expired'))
-            )
-        """)
-
-        # Table garden
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS garden (
-                guild_id TEXT,
-                user_id TEXT,
-                plant_type TEXT,
-                planted_at REAL,
-                last_watered REAL,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-
-        # Table user_plants
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_plants (
-                user_id INTEGER,
-                plant_type TEXT,
-                planted_date TEXT,
-                last_watered TEXT,
-                growth_stage INTEGER DEFAULT 0,
-                water_days INTEGER DEFAULT 1,
-                total_days INTEGER DEFAULT 1,
-                PRIMARY KEY (user_id, plant_type)
-            )
-        """)
-
-        # Table user_notifications
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_notifications (
-                guild_id TEXT,
-                notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
-                type TEXT,
-                data TEXT,
-                timestamp INTEGER,
-                read BOOLEAN DEFAULT 0
-            )
-        """)
-
-        # Table guild_settings
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id TEXT PRIMARY KEY,
-                economy_enabled INTEGER NOT NULL DEFAULT 1
-            )
-        """)
-
-        # Tables Jules
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS guild_config (
-                guild_id TEXT PRIMARY KEY,
-                welcome_channel_id TEXT,
-                welcome_message TEXT,
-                welcome_image_url TEXT,
-                leave_channel_id TEXT,
-                leave_message TEXT,
-                captcha_channel_id TEXT,
-                verified_role_id TEXT,
-                ticket_category_id TEXT,
-                support_role_ids TEXT DEFAULT '[]',
-                voice_trigger_id TEXT
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS command_permissions (
-                guild_id TEXT,
-                command_name TEXT,
-                role_id TEXT,
-                PRIMARY KEY (guild_id, command_name, role_id)
-            )
-        """)
-        
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS warnings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                guild_id TEXT, 
-                user_id TEXT, 
-                moderator_id TEXT, 
-                reason TEXT, 
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS tickets (
-                channel_id TEXT PRIMARY KEY, 
-                guild_id TEXT, 
-                user_id TEXT, 
-                status TEXT DEFAULT 'open'
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS backups (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id TEXT,
-                creator_id TEXT,
-                name TEXT,
-                data BLOB,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-# ---- FONCTIONS UTILITAIRES ----
 def execute_query(query: str, params: tuple = ()) -> None:
-    with get_conn() as conn:
-        conn.execute(query, params)
+    query_upper = query.strip().upper()
+    
+    # CREATE TABLE - Ignoré
+    if query_upper.startswith("CREATE TABLE") or query_upper.startswith("DROP TABLE") or query_upper.startswith("PRAGMA"):
+        return
+
+    # INSERT INTO table (cols) VALUES (?, ?, ...)
+    match_insert = re.match(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(\w+)\s*\((.*?)\)\s*VALUES\s*\((.*?)\)", query, re.IGNORECASE | re.DOTALL)
+    if match_insert:
+        table, cols_str, vals_placeholder = match_insert.groups()
+        cols = [c.strip() for c in cols_str.split(",")]
+        doc = dict(zip(cols, params))
+        
+        # Gestion de l'auto-increment
+        auto_inc_tables = {
+            "marketplace_listings": "listing_id",
+            "warnings": "id",
+            "backups": "id",
+            "user_notifications": "notification_id",
+            "tickets": "id"
+        }
+        
+        table_lower = table.lower()
+        if table_lower in auto_inc_tables:
+            id_col = auto_inc_tables[table_lower]
+            if id_col not in doc:
+                doc[id_col] = get_next_sequence_value(table_lower + "_" + id_col)
+        
+        # INSERT OR REPLACE / INSERT OR IGNORE
+        if "REPLACE" in query_upper:
+            # Besoin d'une clé unique pour replace, souvent guild_id + user_id ou owner_id
+            filter_doc = {}
+            if "guild_id" in doc: filter_doc["guild_id"] = doc["guild_id"]
+            if "user_id" in doc: filter_doc["user_id"] = doc["user_id"]
+            if "owner_id" in doc: filter_doc["owner_id"] = doc["owner_id"]
+            if "listing_id" in doc: filter_doc["listing_id"] = doc["listing_id"]
+            if "channel_id" in doc: filter_doc["channel_id"] = doc["channel_id"]
+            if not filter_doc: filter_doc = doc # Fallback
+            db[table].update_one(filter_doc, {"$set": doc}, upsert=True)
+        else:
+            try: db[table].insert_one(doc)
+            except: pass # Ignore if duplicate
+        return
+
+    # UPDATE table SET col = ?, ... WHERE ...
+    match_update = re.match(r"UPDATE\s+(\w+)\s+SET\s+(.*?)\s+WHERE\s+(.*)", query, re.IGNORECASE | re.DOTALL)
+    if match_update:
+        table, set_clause, where_clause = match_update.groups()
+        # Séparer les params entre SET et WHERE
+        # On compte les ? dans set_clause
+        set_params_count = set_clause.count('?')
+        set_params = params[:set_params_count]
+        where_params = params[set_params_count:]
+        
+        filter_doc = parse_sql_where(where_clause, where_params)
+        
+        updates = {"$set": {}, "$inc": {}}
+        set_parts = [p.strip() for p in set_clause.split(",")]
+        for i, part in enumerate(set_parts):
+            # Gérer "col = col + ?"
+            inc_match = re.match(r"(\w+)\s*=\s*\1\s*([+-])\s*\?", part, re.IGNORECASE)
+            if inc_match:
+                col, op = inc_match.groups()
+                val = set_params[i]
+                updates["$inc"][col] = val if op == '+' else -val
+            else:
+                set_match = re.match(r"(\w+)\s*=\s*\?", part, re.IGNORECASE)
+                if set_match:
+                    col = set_match.group(1)
+                    updates["$set"][col] = set_params[i]
+        
+        if not updates["$inc"]: del updates["$inc"]
+        if not updates["$set"]: del updates["$set"]
+        
+        db[table].update_many(filter_doc, updates)
+        return
+
+    # DELETE FROM table WHERE ...
+    match_delete = re.match(r"DELETE\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*))?", query, re.IGNORECASE | re.DOTALL)
+    if match_delete:
+        table, where_clause = match_delete.groups()
+        filter_doc = parse_sql_where(where_clause, params) if where_clause else {}
+        db[table].delete_many(filter_doc)
+        return
 
 def fetch_one(query: str, params: tuple = ()) -> Optional[tuple]:
-    with get_conn() as conn:
-        return conn.execute(query, params).fetchone()
+    query_upper = query.strip().upper()
+    if not query_upper.startswith("SELECT"): return None
+    
+    # SELECT col1, col2 FROM table WHERE ...
+    match_select = re.match(r"SELECT\s+(.*?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*?))?(?:\s+ORDER\s+BY.*)?(?:\s+LIMIT.*)?", query, re.IGNORECASE | re.DOTALL)
+    if match_select:
+        cols_str, table, where_clause = match_select.groups()
+        filter_doc = parse_sql_where(where_clause, params) if where_clause else {}
+        
+        doc = db[table].find_one(filter_doc)
+        if not doc: return None
+        
+        if cols_str.strip() == "1": return (1,)
+        
+        if cols_str.strip() == "*":
+            doc.pop("_id", None)
+            vals = list(doc.values())
+        else:
+            cols = [c.strip() for c in cols_str.split(",")]
+            # Gérer COUNT(*)
+            if len(cols) == 1 and cols[0].upper().startswith("COUNT("):
+                count = db[table].count_documents(filter_doc)
+                return (count,)
+            vals = [doc.get(c) for c in cols]
+            
+        row = []
+        for v in vals:
+            if isinstance(v, (dict, list)):
+                import json
+                row.append(json.dumps(v))
+            else:
+                row.append(v)
+        return tuple(row)
+    return None
 
 def fetch_all(query: str, params: tuple = ()) -> List[tuple]:
-    with get_conn() as conn:
-        return conn.execute(query, params).fetchall()
+    query_upper = query.strip().upper()
+    if not query_upper.startswith("SELECT"): return []
+    
+    match_select = re.match(r"SELECT\s+(.*?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*?))?(?:\s+ORDER\s+BY\s+(.*?))?(?:\s+LIMIT\s+(\d+))?", query, re.IGNORECASE | re.DOTALL)
+    if match_select:
+        cols_str, table, where_clause, order_clause, limit = match_select.groups()
+        filter_doc = parse_sql_where(where_clause, params) if where_clause else {}
+        
+        cursor = db[table].find(filter_doc)
+        
+        # Gestion du tri (très basique)
+        if order_clause:
+            order_parts = order_clause.strip().split()
+            col = order_parts[0]
+            direction = -1 if "DESC" in order_clause.upper() else 1
+            cursor = cursor.sort(col, direction)
+            
+        if limit:
+            cursor = cursor.limit(int(limit))
+            
+        results = []
+        cols = [c.strip() for c in cols_str.split(",")]
+        
+        for doc in cursor:
+            # On enlève le _id de mongo pour rester proche de SQLite si possible
+            doc.pop("_id", None)
+            
+            row = []
+            if cols_str.strip() == "*":
+                vals = list(doc.values())
+            else:
+                vals = [doc.get(c) for c in cols]
+                
+            for v in vals:
+                if isinstance(v, (dict, list)):
+                    import json
+                    row.append(json.dumps(v))
+                else:
+                    row.append(v)
+            results.append(tuple(row))
+        return results
+    return []
 
 # ---- FONCTIONS UTILISATEURS ----
 def user_init(guild_id: str, user_id: str) -> None:
-    with get_conn() as conn:
-        conn.execute("INSERT OR IGNORE INTO users (guild_id, user_id, wallet, bank) VALUES (?, ?, 0, 0)", (str(guild_id), str(user_id)))
-        conn.execute("INSERT OR IGNORE INTO inventaire (guild_id, user_id, inventory) VALUES (?, ?, '{}')", (str(guild_id), str(user_id)))
-        conn.execute("INSERT OR IGNORE INTO jobs (guild_id, user_id, current_job, knowledge, unlocked_jobs, work_count, last_work) VALUES (?, ?, 'livreur', 0, '[\"livreur\"]', 0, NULL)", (str(guild_id), str(user_id)))
+    guild_id, user_id = str(guild_id), str(user_id)
+    db.users.update_one(
+        {"guild_id": guild_id, "user_id": user_id},
+        {"$setOnInsert": {"wallet": 0, "bank": 0}},
+        upsert=True
+    )
+    db.inventaire.update_one(
+        {"guild_id": guild_id, "user_id": user_id},
+        {"$setOnInsert": {"inventory": {}}},
+        upsert=True
+    )
+    db.jobs.update_one(
+        {"guild_id": guild_id, "user_id": user_id},
+        {"$setOnInsert": {
+            "current_job": "livreur",
+            "knowledge": 0,
+            "unlocked_jobs": ["livreur"],
+            "work_count": 0,
+            "last_work": None
+        }},
+        upsert=True
+    )
 
 def get_wallet_bank(guild_id: str, user_id: str) -> Dict[str, int]:
-    result = fetch_one("SELECT wallet, bank FROM users WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
-    return {"wallet": result[0], "bank": result[1]} if result else {"wallet": 0, "bank": 0}
+    user = db.users.find_one({"guild_id": str(guild_id), "user_id": str(user_id)})
+    if user:
+        return {"wallet": user.get("wallet", 0), "bank": user.get("bank", 0)}
+    return {"wallet": 0, "bank": 0}
 
 def update_wallet(guild_id: str, user_id: str, amount: int) -> None:
-    current = get_wallet_bank(guild_id, user_id)
-    new_wallet = max(0, current["wallet"] + amount)
-    execute_query("UPDATE users SET wallet = ? WHERE guild_id = ? AND user_id = ?", (new_wallet, str(guild_id), str(user_id)))
+    guild_id, user_id = str(guild_id), str(user_id)
+    db.users.update_one(
+        {"guild_id": guild_id, "user_id": user_id},
+        {"$inc": {"wallet": amount}},
+        upsert=True
+    )
+    # Assurer que le wallet n'est pas négatif
+    db.users.update_one(
+        {"guild_id": guild_id, "user_id": user_id, "wallet": {"$lt": 0}},
+        {"$set": {"wallet": 0}}
+    )
 
 def update_bank(guild_id: str, user_id: str, amount: int) -> None:
-    current = get_wallet_bank(guild_id, user_id)
-    new_bank = max(0, current["bank"] + amount)
-    execute_query("UPDATE users SET bank = ? WHERE guild_id = ? AND user_id = ?", (new_bank, str(guild_id), str(user_id)))
+    guild_id, user_id = str(guild_id), str(user_id)
+    db.users.update_one(
+        {"guild_id": guild_id, "user_id": user_id},
+        {"$inc": {"bank": amount}},
+        upsert=True
+    )
+    # Assurer que la banque n'est pas négative
+    db.users.update_one(
+        {"guild_id": guild_id, "user_id": user_id, "bank": {"$lt": 0}},
+        {"$set": {"bank": 0}}
+    )
 
 def get_all_users_with_balances(guild_id: str) -> List[tuple]:
-    return fetch_all("SELECT user_id, wallet, bank FROM users WHERE guild_id = ?", (str(guild_id),))
+    users = db.users.find({"guild_id": str(guild_id)})
+    return [(u["user_id"], u.get("wallet", 0), u.get("bank", 0)) for u in users]
 
 # ---- FONCTIONS INVENTAIRE ----
 def get_inventaire(guild_id: str, user_id: str) -> Dict:
-    result = fetch_one("SELECT inventory FROM inventaire WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
-    return json.loads(result[0]) if result and result[0] else {}
+    inv = db.inventaire.find_one({"guild_id": str(guild_id), "user_id": str(user_id)})
+    return inv.get("inventory", {}) if inv else {}
 
 def update_inventaire(guild_id: str, user_id: str, inventory: Dict) -> None:
-    execute_query("UPDATE inventaire SET inventory = ? WHERE guild_id = ? AND user_id = ?", (json.dumps(inventory), str(guild_id), str(user_id)))
+    db.inventaire.update_one(
+        {"guild_id": str(guild_id), "user_id": str(user_id)},
+        {"$set": {"inventory": inventory}},
+        upsert=True
+    )
 
 # ---- FONCTIONS INVESTISSEMENTS ----
 def get_investissements(guild_id: str, user_id: str) -> Dict:
-    row = fetch_one("SELECT nom_invest, duration, reward, start, end FROM investissements WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
-    if not row: return {}
-    return {"nom_invest": row[0], "duration": row[1], "reward": row[2], "start": row[3], "end": row[4]}
+    inv = db.investissements.find_one({"guild_id": str(guild_id), "user_id": str(user_id)})
+    if not inv: return {}
+    return {
+        "nom_invest": inv.get("nom_invest"),
+        "duration": inv.get("duration"),
+        "reward": inv.get("reward"),
+        "start": inv.get("start"),
+        "end": inv.get("end")
+    }
 
 def update_investissements(guild_id: str, user_id: str, invest_dict: Optional[Dict]) -> None:
     if not invest_dict:
-        execute_query("DELETE FROM investissements WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
+        db.investissements.delete_one({"guild_id": str(guild_id), "user_id": str(user_id)})
     else:
-        execute_query("""
-            INSERT INTO investissements (guild_id, user_id, nom_invest, duration, reward, start, end)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                nom_invest = excluded.nom_invest, duration = excluded.duration,
-                reward = excluded.reward, start = excluded.start, end = excluded.end
-        """, (str(guild_id), str(user_id), invest_dict["nom_invest"], invest_dict["duration"], invest_dict["reward"], invest_dict["start"], invest_dict["end"]))
+        db.investissements.update_one(
+            {"guild_id": str(guild_id), "user_id": str(user_id)},
+            {"$set": invest_dict},
+            upsert=True
+        )
 
 # ---- FONCTIONS JOBS ----
 def get_job_data(guild_id: str, user_id: str) -> Dict:
-    result = fetch_one("SELECT current_job, knowledge, unlocked_jobs, work_count, last_work FROM jobs WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
-    if result:
-        current_job, knowledge, unlocked_jobs_json, work_count, last_work = result
-        try: unlocked_jobs = json.loads(unlocked_jobs_json)
-        except: unlocked_jobs = []
-        return {"current_job": current_job, "knowledge": knowledge, "unlocked_jobs": unlocked_jobs, "work_count": work_count, "last_work": last_work}
+    job = db.jobs.find_one({"guild_id": str(guild_id), "user_id": str(user_id)})
+    if job:
+        return {
+            "current_job": job.get("current_job", "Livreur"),
+            "knowledge": job.get("knowledge", 0),
+            "unlocked_jobs": job.get("unlocked_jobs", ["Livreur", "Agent de nettoyage", "Caissier"]),
+            "work_count": job.get("work_count", 0),
+            "last_work": job.get("last_work")
+        }
     return {"current_job": "Livreur", "knowledge": 0, "unlocked_jobs": ["Livreur", "Agent de nettoyage", "Caissier"], "work_count": 0, "last_work": None}
 
 def update_job(guild_id: str, user_id: str, key: str, value: Union[str, int, List]) -> None:
-    if isinstance(value, list): value = json.dumps(value)
-    execute_query(f"UPDATE jobs SET {key} = ? WHERE guild_id = ? AND user_id = ?", (value, str(guild_id), str(user_id)))
+    db.jobs.update_one(
+        {"guild_id": str(guild_id), "user_id": str(user_id)},
+        {"$set": {key: value}},
+        upsert=True
+    )
 
 def get_work_cooldown(guild_id: str, user_id: str) -> Optional[str]:
-    result = fetch_one("SELECT last_work FROM jobs WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
-    return result[0] if result else None
+    job = db.jobs.find_one({"guild_id": str(guild_id), "user_id": str(user_id)})
+    return job.get("last_work") if job else None
 
 def update_work_cooldown(guild_id: str, user_id: str, timestamp: str) -> None:
-    execute_query("UPDATE jobs SET last_work = ? WHERE guild_id = ? AND user_id = ?", (timestamp, str(guild_id), str(user_id)))
+    db.jobs.update_one(
+        {"guild_id": str(guild_id), "user_id": str(user_id)},
+        {"$set": {"last_work": timestamp}},
+        upsert=True
+    )
 
 # ---- FONCTIONS ENTREPRISES ----
 def create_entreprise(guild_id: str, owner_id: str, nom: str) -> None:
-    execute_query("INSERT OR REPLACE INTO entreprises (guild_id, owner_id, nom, tresorerie, tresorerie_max, nb_work_requis, nb_work_restants, revenu_par_cycle, visibilite) VALUES (?, ?, ?, 5000, 10000, 10, 10, 1000, 'prive')", (str(guild_id), str(owner_id), nom))
+    db.entreprises.update_one(
+        {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+        {"$set": {
+            "nom": nom,
+            "tresorerie": 5000,
+            "tresorerie_max": 10000,
+            "nb_work_requis": 10,
+            "nb_work_restants": 10,
+            "revenu_par_cycle": 1000,
+            "visibilite": "prive"
+        }},
+        upsert=True
+    )
 
 def get_entreprise(guild_id: str, owner_id: str) -> Optional[Dict]:
-    row = fetch_one("SELECT nom, tresorerie, tresorerie_max, nb_work_requis, nb_work_restants, visibilite, revenu_par_cycle, last_rename FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    if not row: return None
-    return {"nom": row[0], "tresorerie": row[1], "tresorerie_max": row[2], "nb_work_requis": row[3], "nb_work_restants": row[4], "visibilite": row[5], "revenu_par_cycle": row[6], "last_rename": row[7]}
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    if not ent: return None
+    return {
+        "nom": ent.get("nom"),
+        "tresorerie": ent.get("tresorerie"),
+        "tresorerie_max": ent.get("tresorerie_max"),
+        "nb_work_requis": ent.get("nb_work_requis"),
+        "nb_work_restants": ent.get("nb_work_restants"),
+        "visibilite": ent.get("visibilite"),
+        "revenu_par_cycle": ent.get("revenu_par_cycle"),
+        "last_rename": ent.get("last_rename")
+    }
 
 def get_entreprise_by_name(guild_id: str, nom_entreprise: str) -> Optional[Dict]:
-    with get_conn() as conn:
-        cursor = conn.execute("SELECT * FROM entreprises WHERE guild_id = ? AND nom = ?", (str(guild_id), nom_entreprise))
-        row = cursor.fetchone()
-        if row:
-            columns = [column[0] for column in cursor.description]
-            return dict(zip(columns, row))
-        return None
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "nom": nom_entreprise})
+    return ent
 
 def update_entreprise_name(guild_id: str, owner_id: str, new_name: str, timestamp: Optional[str] = None) -> None:
-    execute_query("UPDATE entreprises SET nom = ?, last_rename = ? WHERE guild_id = ? AND owner_id = ?", (new_name, timestamp, str(guild_id), str(owner_id)))
+    db.entreprises.update_one(
+        {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+        {"$set": {"nom": new_name, "last_rename": timestamp}}
+    )
 
 def update_entreprise_visibility(guild_id: str, owner_id: str, new_visibility: str) -> None:
-    execute_query("UPDATE entreprises SET visibilite = ? WHERE guild_id = ? AND owner_id = ?", (new_visibility, str(guild_id), str(owner_id)))
+    db.entreprises.update_one(
+        {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+        {"$set": {"visibilite": new_visibility}}
+    )
 
 def get_tresorerie_entreprise(guild_id: str, owner_id: str) -> int:
-    result = fetch_one("SELECT tresorerie FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    return result[0] if result else 0
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    return ent.get("tresorerie", 0) if ent else 0
 
 def update_tresorerie_entreprise(guild_id: str, owner_id: str, montant: int) -> None:
-    execute_query("UPDATE entreprises SET tresorerie = ? WHERE guild_id = ? AND owner_id = ?", (montant, str(guild_id), str(owner_id)))
+    db.entreprises.update_one(
+        {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+        {"$set": {"tresorerie": montant}}
+    )
 
 def set_entreprise_tresorerie(guild_id: str, owner_id: str, montant: int) -> None:
     update_tresorerie_entreprise(guild_id, owner_id, montant)
 
 def get_work_restants(guild_id: str, owner_id: str) -> int:
-    result = fetch_one("SELECT nb_work_restants FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    return result[0] if result else 0
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    return ent.get("nb_work_restants", 0) if ent else 0
 
 def update_work_restants(guild_id: str, owner_id: str, reste: int) -> None:
-    execute_query("UPDATE entreprises SET nb_work_restants = ? WHERE guild_id = ? AND owner_id = ?", (reste, str(guild_id), str(owner_id)))
+    db.entreprises.update_one(
+        {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+        {"$set": {"nb_work_restants": reste}}
+    )
 
 def set_work_restants(guild_id: str, owner_id: str, reste: int) -> None:
     update_work_restants(guild_id, owner_id, reste)
 
 def get_work_requis(guild_id: str, owner_id: str) -> int:
-    result = fetch_one("SELECT nb_work_requis FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    return result[0] if result else 0
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    return ent.get("nb_work_requis", 0) if ent else 0
 
 def get_revenu_par_cycle(guild_id: str, owner_id: str) -> int:
-    result = fetch_one("SELECT revenu_par_cycle FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    return result[0] if result else 0
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    return ent.get("revenu_par_cycle", 0) if ent else 0
 
 def withdraw_entreprise_money(guild_id: str, owner_id: str, amount: int) -> bool:
-    treso = get_tresorerie_entreprise(guild_id, owner_id)
-    if treso >= amount:
-        update_tresorerie_entreprise(guild_id, owner_id, treso - amount)
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    if ent and ent.get("tresorerie", 0) >= amount:
+        db.entreprises.update_one(
+            {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+            {"$inc": {"tresorerie": -amount}}
+        )
         update_bank(guild_id, owner_id, amount)
         return True
     return False
 
 def delete_entreprise(guild_id: str, owner_id: str) -> None:
     gid, oid = str(guild_id), str(owner_id)
-    execute_query("DELETE FROM entreprise_employes WHERE guild_id = ? AND entreprise_owner_id = ?", (gid, oid))
-    execute_query("DELETE FROM entreprise_buildings WHERE guild_id = ? AND entreprise_owner_id = ?", (gid, oid))
-    execute_query("DELETE FROM entreprises WHERE guild_id = ? AND owner_id = ?", (gid, oid))
+    db.entreprise_employes.delete_many({"guild_id": gid, "entreprise_owner_id": oid})
+    db.entreprise_buildings.delete_many({"guild_id": gid, "entreprise_owner_id": oid})
+    db.entreprises.delete_one({"guild_id": gid, "owner_id": oid})
 
 def get_name_entreprise(guild_id: str, owner_id: str) -> str:
-    result = fetch_one("SELECT nom FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    return result[0] if result else "Entreprise sans nom"
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    return ent.get("nom", "Entreprise sans nom") if ent else "Entreprise sans nom"
 
 def get_name_change_cooldown(guild_id: str, owner_id: str) -> int:
-    row = fetch_one("SELECT last_rename FROM entreprises WHERE guild_id = ? AND owner_id = ?", (str(guild_id), str(owner_id)))
-    if not row or not row[0]: return 0
+    ent = db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(owner_id)})
+    if not ent or not ent.get("last_rename"): return 0
     try:
-        last_rename = datetime.fromisoformat(row[0])
+        last_rename = datetime.fromisoformat(ent["last_rename"])
         elapsed = (datetime.now() - last_rename).total_seconds()
         return max(0, int(24 * 3600 - elapsed))
     except: return 0
 
 def get_all_entreprises_by_guild(guild_id: str) -> List[tuple]:
-    return fetch_all("SELECT e.owner_id, e.nom, e.tresorerie, e.tresorerie_max, e.visibilite, e.revenu_par_cycle, (SELECT COUNT(*) FROM entreprise_employes em WHERE em.entreprise_owner_id = e.owner_id) as employee_count FROM entreprises e WHERE e.guild_id = ?", (str(guild_id),))
+    ents = db.entreprises.find({"guild_id": str(guild_id)})
+    result = []
+    for e in ents:
+        emp_count = db.entreprise_employes.count_documents({"guild_id": str(guild_id), "entreprise_owner_id": e["owner_id"]})
+        result.append((
+            e["owner_id"],
+            e.get("nom", "Entreprise sans nom"),
+            e.get("tresorerie", 0),
+            e.get("tresorerie_max", 10000),
+            e.get("visibilite", "prive"),
+            e.get("revenu_par_cycle", 1000),
+            emp_count
+        ))
+    return result
 
 # ---- FONCTIONS EMPLOYES ----
 def add_employe(guild_id: str, owner_id: str, employe_id: str, role: str = "Employé", salaire: int = 0) -> None:
-    execute_query("INSERT OR REPLACE INTO entreprise_employes (guild_id, entreprise_owner_id, employe_id, role, salaire, nb_work_effectues) VALUES (?, ?, ?, ?, ?, 0)", (str(guild_id), str(owner_id), str(employe_id), role, salaire))
+    db.entreprise_employes.update_one(
+        {"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "employe_id": str(employe_id)},
+        {"$set": {"role": role, "salaire": salaire, "nb_work_effectues": 0}},
+        upsert=True
+    )
 
 def remove_employe(guild_id: str, owner_id: str, employe_id: str) -> None:
-    execute_query("DELETE FROM entreprise_employes WHERE guild_id = ? AND entreprise_owner_id = ? AND employe_id = ?", (str(guild_id), str(owner_id), str(employe_id)))
+    db.entreprise_employes.delete_one({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "employe_id": str(employe_id)})
 
 def get_employes(guild_id: str, owner_id: str) -> List[Dict]:
-    rows = fetch_all("SELECT employe_id, role, salaire, nb_work_effectues FROM entreprise_employes WHERE guild_id = ? AND entreprise_owner_id = ?", (str(guild_id), str(owner_id)))
-    return [{"employe_id": row[0], "role": row[1], "salaire": row[2], "nb_work_effectues": row[3]} for row in rows]
+    emps = db.entreprise_employes.find({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id)})
+    return [{"employe_id": e["employe_id"], "role": e.get("role"), "salaire": e.get("salaire"), "nb_work_effectues": e.get("nb_work_effectues")} for e in emps]
 
 def get_employe(guild_id: str, owner_id: str, employe_id: str) -> Optional[Dict]:
-    row = fetch_one("SELECT role, salaire, nb_work_effectues FROM entreprise_employes WHERE guild_id = ? AND entreprise_owner_id = ? AND employe_id = ?", (str(guild_id), str(owner_id), str(employe_id)))
-    return {"role": row[0], "salaire": row[1], "nb_work_effectues": row[2]} if row else None
+    emp = db.entreprise_employes.find_one({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "employe_id": str(employe_id)})
+    if not emp: return None
+    return {"role": emp.get("role"), "salaire": emp.get("salaire"), "nb_work_effectues": emp.get("nb_work_effectues")}
 
 def update_employe_role(guild_id: str, owner_id: str, employe_id: str, role: str) -> None:
-    execute_query("UPDATE entreprise_employes SET role = ? WHERE guild_id = ? AND entreprise_owner_id = ? AND employe_id = ?", (role, str(guild_id), str(owner_id), str(employe_id)))
+    db.entreprise_employes.update_one(
+        {"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "employe_id": str(employe_id)},
+        {"$set": {"role": role}}
+    )
 
 def update_employe_salaire(guild_id: str, owner_id: str, employe_id: str, salaire: int) -> None:
-    execute_query("UPDATE entreprise_employes SET salaire = ? WHERE guild_id = ? AND entreprise_owner_id = ? AND employe_id = ?", (salaire, str(guild_id), str(owner_id), str(employe_id)))
+    db.entreprise_employes.update_one(
+        {"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "employe_id": str(employe_id)},
+        {"$set": {"salaire": salaire}}
+    )
 
 def increment_work_effectue(guild_id: str, user_id: str) -> None:
-    with get_conn() as conn:
-        result = conn.execute("SELECT entreprise_owner_id FROM entreprise_employes WHERE guild_id = ? AND employe_id = ?", (str(guild_id), str(user_id))).fetchone()
-        if result:
-            ent_id = result[0]
-            conn.execute("UPDATE entreprise_employes SET nb_work_effectues = nb_work_effectues + 1 WHERE guild_id = ? AND entreprise_owner_id = ? AND employe_id = ?", (str(guild_id), ent_id, str(user_id)))
-            conn.execute("UPDATE entreprises SET nb_work_restants = nb_work_restants - 1 WHERE guild_id = ? AND owner_id = ?", (str(guild_id), ent_id))
+    emp = db.entreprise_employes.find_one({"guild_id": str(guild_id), "employe_id": str(user_id)})
+    if emp:
+        ent_id = emp["entreprise_owner_id"]
+        db.entreprise_employes.update_one(
+            {"guild_id": str(guild_id), "entreprise_owner_id": ent_id, "employe_id": str(user_id)},
+            {"$inc": {"nb_work_effectues": 1}}
+        )
+        db.entreprises.update_one(
+            {"guild_id": str(guild_id), "owner_id": ent_id},
+            {"$inc": {"nb_work_restants": -1}}
+        )
 
 def is_employe(guild_id: str, user_id: str) -> bool:
-    return fetch_one("SELECT 1 FROM entreprise_employes WHERE guild_id = ? AND employe_id = ? LIMIT 1", (str(guild_id), str(user_id))) is not None
+    return db.entreprise_employes.find_one({"guild_id": str(guild_id), "employe_id": str(user_id)}) is not None
 
 def is_entreprise_owner(guild_id: str, user_id: str) -> bool:
-    return fetch_one("SELECT 1 FROM entreprises WHERE guild_id = ? AND owner_id = ? LIMIT 1", (str(guild_id), str(user_id))) is not None
+    return db.entreprises.find_one({"guild_id": str(guild_id), "owner_id": str(user_id)}) is not None
 
 def get_entreprise_owner_id(guild_id: str, user_id: str) -> Optional[str]:
-    result = fetch_one("SELECT entreprise_owner_id FROM entreprise_employes WHERE guild_id = ? AND employe_id = ?", (str(guild_id), str(user_id)))
-    return result[0] if result else None
+    emp = db.entreprise_employes.find_one({"guild_id": str(guild_id), "employe_id": str(user_id)})
+    return emp["entreprise_owner_id"] if emp else None
 
 def has_permission(guild_id: str, user_id: str, permission: str) -> bool:
     if is_entreprise_owner(guild_id, user_id): return True
@@ -577,22 +684,32 @@ def has_permission(guild_id: str, user_id: str, permission: str) -> bool:
 # ---- FONCTIONS BÂTIMENTS ----
 def add_building(guild_id: str, owner_id: str, building_type: str) -> bool:
     if building_type not in BUILDING_TYPES: return False
-    rows = fetch_all("SELECT building_id FROM entreprise_buildings WHERE guild_id = ? AND entreprise_owner_id = ?", (str(guild_id), str(owner_id)))
-    next_id = max([r[0] for r in rows] + [0]) + 1
-    execute_query("INSERT INTO entreprise_buildings (guild_id, entreprise_owner_id, building_type, level, last_maintenance, building_id) VALUES (?, ?, ?, 1, ?, ?)", (str(guild_id), str(owner_id), building_type, datetime.now().isoformat(), next_id))
+    buildings = list(db.entreprise_buildings.find({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id)}))
+    next_id = max([b.get("building_id", 0) for b in buildings] + [0]) + 1
+    db.entreprise_buildings.insert_one({
+        "guild_id": str(guild_id),
+        "entreprise_owner_id": str(owner_id),
+        "building_type": building_type,
+        "level": 1,
+        "last_maintenance": datetime.now().isoformat(),
+        "building_id": next_id
+    })
     update_max_tresorerie(guild_id, owner_id)
     return True
 
 def upgrade_building(guild_id: str, owner_id: str, building_id: int) -> bool:
-    execute_query("UPDATE entreprise_buildings SET level = level + 1 WHERE guild_id = ? AND entreprise_owner_id = ? AND building_id = ?", (str(guild_id), str(owner_id), building_id))
+    db.entreprise_buildings.update_one(
+        {"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "building_id": building_id},
+        {"$inc": {"level": 1}}
+    )
     update_max_tresorerie(guild_id, owner_id)
     return True
 
 def get_entreprise_buildings(guild_id: str, owner_id: str) -> List[Dict]:
-    rows = fetch_all("SELECT building_type, level, last_maintenance, building_id FROM entreprise_buildings WHERE guild_id = ? AND entreprise_owner_id = ? ORDER BY building_id ASC", (str(guild_id), str(owner_id)))
+    rows = db.entreprise_buildings.find({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id)}).sort("building_id", 1)
     buildings = []
     for row in rows:
-        b_type, level, last_m, b_id = row
+        b_type, level, last_m, b_id = row["building_type"], row["level"], row["last_maintenance"], row["building_id"]
         if b_type in BUILDING_TYPES:
             info = BUILDING_TYPES[b_type].copy()
             info.update({"building_type": b_type, "level": level, "last_maintenance": last_m, "building_id": b_id})
@@ -602,18 +719,23 @@ def get_entreprise_buildings(guild_id: str, owner_id: str) -> List[Dict]:
 def update_max_tresorerie(guild_id: str, owner_id: str) -> None:
     buildings = get_entreprise_buildings(guild_id, owner_id)
     total = 10000 + sum(BUILDING_TYPES[b["building_type"]]["storage_bonus"] * b["level"] for b in buildings if b["building_type"] in BUILDING_TYPES)
-    execute_query("UPDATE entreprises SET tresorerie_max = ? WHERE guild_id = ? AND owner_id = ?", (total, str(guild_id), str(owner_id)))
+    db.entreprises.update_one(
+        {"guild_id": str(guild_id), "owner_id": str(owner_id)},
+        {"$set": {"tresorerie_max": total}}
+    )
 
 def reorganize_building_ids(guild_id: str, owner_id: str) -> None:
-    buildings = fetch_all("SELECT building_type, level, last_maintenance FROM entreprise_buildings WHERE guild_id = ? AND entreprise_owner_id = ? ORDER BY building_id ASC", (str(guild_id), str(owner_id)))
-    execute_query("DELETE FROM entreprise_buildings WHERE guild_id = ? AND entreprise_owner_id = ?", (str(guild_id), str(owner_id)))
-    for i, (b_type, level, last_m) in enumerate(buildings, 1):
-        execute_query("INSERT INTO entreprise_buildings (guild_id, entreprise_owner_id, building_type, level, last_maintenance, building_id) VALUES (?, ?, ?, ?, ?, ?)", (str(guild_id), str(owner_id), b_type, level, last_m, i))
+    buildings = list(db.entreprise_buildings.find({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id)}).sort("building_id", 1))
+    db.entreprise_buildings.delete_many({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id)})
+    for i, b in enumerate(buildings, 1):
+        b.pop("_id", None)
+        b["building_id"] = i
+        db.entreprise_buildings.insert_one(b)
 
 def get_building_upgrade_cost(guild_id: str, owner_id: str, building_id: int) -> int:
-    row = fetch_one("SELECT building_type, level FROM entreprise_buildings WHERE guild_id = ? AND entreprise_owner_id = ? AND building_id = ?", (str(guild_id), str(owner_id), building_id))
+    row = db.entreprise_buildings.find_one({"guild_id": str(guild_id), "entreprise_owner_id": str(owner_id), "building_id": building_id})
     if not row: return 0
-    b_type, level = row
+    b_type, level = row["building_type"], row["level"]
     return get_building_cost(b_type, level + 1)
 
 def get_building_cost(b_type: str, level: int) -> int:
@@ -646,136 +768,207 @@ def calculate_total_work_required(guild_id: str, owner_id: str) -> int:
 
 # ---- FONCTIONS MARKETPLACE ----
 def get_marketplace_listings():
-    return fetch_all("SELECT * FROM marketplace_listings WHERE status = 'active' AND expires_at > ?", (datetime.now().timestamp(),))
+    listings = db.marketplace_listings.find({"status": "active", "expires_at": {"$gt": datetime.now().timestamp()}})
+    # Conversion vers le format attendu par le reste du code (tuples ou dicts selon l'usage)
+    # Dans SQLite fetch_all retournait des tuples. Si le code utilise des index numériques, il faut des tuples.
+    # On va retourner des tuples pour matcher le comportement SQLite.
+    result = []
+    for l in listings:
+        result.append((
+            l.get("guild_id"),
+            l.get("listing_id"),
+            l.get("seller_id"),
+            l.get("item_name"),
+            l.get("quantity"),
+            l.get("price_per_unit"),
+            l.get("description", ""),
+            l.get("created_at"),
+            l.get("expires_at"),
+            l.get("status")
+        ))
+    return result
 
 def cancel_marketplace_listing(guild_id: str, listing_id: int, seller_id: str) -> bool:
-    execute_query("UPDATE marketplace_listings SET status = 'cancelled' WHERE guild_id = ? AND listing_id = ? AND seller_id = ?", (str(guild_id), listing_id, str(seller_id)))
+    db.marketplace_listings.update_one(
+        {"guild_id": str(guild_id), "listing_id": listing_id, "seller_id": str(seller_id)},
+        {"$set": {"status": "cancelled"}}
+    )
     return True
 
 # ---- FONCTIONS PLANTES ----
 def get_user_plants(user_id: int):
-    return fetch_all("SELECT plant_type, planted_date, last_watered, growth_stage, water_days, total_days FROM user_plants WHERE user_id = ?", (user_id,))
+    plants = db.user_plants.find({"user_id": str(user_id)})
+    return [(p["plant_type"], p.get("planted_date"), p.get("last_watered"), p.get("growth_stage"), p.get("water_days"), p.get("total_days")) for p in plants]
 
 def manage_plant(user_id: int, action: str, plant_type: str = None, **kwargs) -> tuple[bool, str]:
+    user_id = str(user_id)
     try:
         if action == "add":
-            execute_query("INSERT INTO user_plants (user_id, plant_type, planted_date, last_watered, growth_stage, water_days, total_days) VALUES (?, ?, ?, ?, 0, ?, ?)", (user_id, plant_type, kwargs['planted_date'], kwargs['last_watered'], kwargs['water_days'], kwargs['total_days']))
+            db.user_plants.insert_one({
+                "user_id": user_id,
+                "plant_type": plant_type,
+                "planted_date": kwargs['planted_date'],
+                "last_watered": kwargs['last_watered'],
+                "growth_stage": 0,
+                "water_days": kwargs['water_days'],
+                "total_days": kwargs['total_days']
+            })
             return True, "Plante ajoutée."
         elif action == "water":
-            execute_query("UPDATE user_plants SET last_watered = ?, growth_stage = ? WHERE user_id = ? AND plant_type = ?", (kwargs['new_water_date'], kwargs['new_growth_stage'], user_id, plant_type))
+            db.user_plants.update_one(
+                {"user_id": user_id, "plant_type": plant_type},
+                {"$set": {"last_watered": kwargs['new_water_date'], "growth_stage": kwargs['new_growth_stage']}}
+            )
             return True, "Plante arrosée."
         elif action == "delete":
-            execute_query("DELETE FROM user_plants WHERE user_id = ? AND plant_type = ?", (user_id, plant_type))
+            db.user_plants.delete_one({"user_id": user_id, "plant_type": plant_type})
             return True, "Plante supprimée."
         return False, "Action inconnue."
     except Exception as e: return False, str(e)
 
 # ---- FONCTIONS JULES ----
 def get_config(guild_id: int):
-    row = fetch_one("SELECT * FROM guild_config WHERE guild_id = ?", (str(guild_id),))
-    if row:
-        with get_conn() as conn:
-            cursor = conn.execute("PRAGMA table_info(guild_config)")
-            cols = [c[1] for c in cursor.fetchall()]
-        config = {}
-        for i, col in enumerate(cols):
-            val = row[i]
-            if col == "support_role_ids": config[col] = json.loads(val) if val else []
-            elif col.endswith("_id") and val: config[col] = int(val)
-            else: config[col] = val
-        return config
+    conf = db.guild_config.find_one({"guild_id": str(guild_id)})
+    if conf:
+        conf.pop("_id", None)
+        # Conversion des IDs en int pour la compatibilité
+        for key, val in conf.items():
+            if key.endswith("_id") and val:
+                try: conf[key] = int(val)
+                except: pass
+            if key == "support_role_ids" and isinstance(val, str):
+                import json
+                try: conf[key] = json.loads(val)
+                except: pass
+        return conf
     return None
 
 def update_config(guild_id: int, **kwargs):
-    if not fetch_one("SELECT 1 FROM guild_config WHERE guild_id = ?", (str(guild_id),)):
-        execute_query("INSERT INTO guild_config (guild_id) VALUES (?)", (str(guild_id),))
-    for key, value in kwargs.items():
-        execute_query(f"UPDATE guild_config SET {key} = ? WHERE guild_id = ?", (str(value) if value is not None else None, str(guild_id)))
+    updates = {}
+    for k, v in kwargs.items():
+        if k == "support_role_ids" and isinstance(v, list):
+            import json
+            updates[k] = json.dumps(v)
+        else:
+            updates[k] = str(v) if v is not None else None
+            
+    db.guild_config.update_one(
+        {"guild_id": str(guild_id)},
+        {"$set": updates},
+        upsert=True
+    )
 
 def add_warning(guild_id: int, user_id: int, moderator_id: int, reason: str):
-    execute_query("INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (str(guild_id), str(user_id), str(moderator_id), reason))
+    db.warnings.insert_one({
+        "guild_id": str(guild_id),
+        "user_id": str(user_id),
+        "moderator_id": str(moderator_id),
+        "reason": reason,
+        "timestamp": datetime.now().isoformat()
+    })
 
 def get_warnings(guild_id: int, user_id: int):
-    return fetch_all("SELECT moderator_id, reason, timestamp FROM warnings WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
+    warns = db.warnings.find({"guild_id": str(guild_id), "user_id": str(user_id)})
+    return [(w["moderator_id"], w["reason"], w["timestamp"]) for w in warns]
 
 def clear_warnings(guild_id: int, user_id: int):
-    execute_query("DELETE FROM warnings WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
+    db.warnings.delete_many({"guild_id": str(guild_id), "user_id": str(user_id)})
 
 def create_ticket(channel_id: int, guild_id: int, user_id: int):
-    execute_query("INSERT INTO tickets (channel_id, guild_id, user_id) VALUES (?, ?, ?)", (str(channel_id), str(guild_id), str(user_id)))
+    db.tickets.insert_one({
+        "channel_id": str(channel_id),
+        "guild_id": str(guild_id),
+        "user_id": str(user_id),
+        "status": "open"
+    })
 
 def close_ticket(channel_id: int):
-    execute_query("UPDATE tickets SET status = 'closed' WHERE channel_id = ?", (str(channel_id),))
+    db.tickets.update_one({"channel_id": str(channel_id)}, {"$set": {"status": "closed"}})
 
 def has_open_ticket(guild_id: int, user_id: int) -> bool:
-    return fetch_one("SELECT 1 FROM tickets WHERE guild_id = ? AND user_id = ? AND status = 'open'", (str(guild_id), str(user_id))) is not None
+    return db.tickets.find_one({"guild_id": str(guild_id), "user_id": str(user_id), "status": "open"}) is not None
 
 # ---- PERMISSIONS DE COMMANDES ----
 def add_command_permission(guild_id: str, command_name: str, role_id: str) -> None:
-    execute_query("INSERT OR IGNORE INTO command_permissions (guild_id, command_name, role_id) VALUES (?, ?, ?)", (str(guild_id), command_name, str(role_id)))
+    db.command_permissions.update_one(
+        {"guild_id": str(guild_id), "command_name": command_name, "role_id": str(role_id)},
+        {"$set": {"guild_id": str(guild_id), "command_name": command_name, "role_id": str(role_id)}},
+        upsert=True
+    )
 
 def remove_command_permission(guild_id: str, command_name: str, role_id: str) -> None:
-    execute_query("DELETE FROM command_permissions WHERE guild_id = ? AND command_name = ? AND role_id = ?", (str(guild_id), command_name, str(role_id)))
+    db.command_permissions.delete_one({"guild_id": str(guild_id), "command_name": command_name, "role_id": str(role_id)})
 
 def get_command_permissions(guild_id: str, command_name: str) -> List[str]:
-    rows = fetch_all("SELECT role_id FROM command_permissions WHERE guild_id = ? AND command_name = ?", (str(guild_id), command_name))
-    return [r[0] for r in rows]
+    perms = db.command_permissions.find({"guild_id": str(guild_id), "command_name": command_name})
+    return [p["role_id"] for p in perms]
 
 # ---- ECONOMIE ----
 def set_economy_enabled(guild_id: str, enabled: bool) -> None:
-    execute_query("INSERT OR REPLACE INTO guild_settings (guild_id, economy_enabled) VALUES (?, ?)", (str(guild_id), 1 if enabled else 0))
+    db.guild_settings.update_one(
+        {"guild_id": str(guild_id)},
+        {"$set": {"economy_enabled": 1 if enabled else 0}},
+        upsert=True
+    )
 
 def is_economy_enabled(guild_id: str) -> bool:
-    row = fetch_one("SELECT economy_enabled FROM guild_settings WHERE guild_id = ?", (str(guild_id),))
-    return bool(row[0]) if row else True
+    res = db.guild_settings.find_one({"guild_id": str(guild_id)})
+    return bool(res.get("economy_enabled", 1)) if res else True
 
 def reset_guild_economy(guild_id: str) -> None:
     gid = str(guild_id)
-    with get_conn() as conn:
-        conn.execute("DELETE FROM entreprise_employes WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM entreprise_buildings WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM marketplace_listings WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM investissements WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM jobs WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM inventaire WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM garden WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM entreprises WHERE guild_id = ?", (gid,))
-        conn.execute("DELETE FROM users WHERE guild_id = ?", (gid,))
+    db.entreprise_employes.delete_many({"guild_id": gid})
+    db.entreprise_buildings.delete_many({"guild_id": gid})
+    db.marketplace_listings.delete_many({"guild_id": gid})
+    db.investissements.delete_many({"guild_id": gid})
+    db.jobs.delete_many({"guild_id": gid})
+    db.inventaire.delete_many({"guild_id": gid})
+    db.garden.delete_many({"guild_id": gid})
+    db.entreprises.delete_many({"guild_id": gid})
+    db.users.delete_many({"guild_id": gid})
 
 def get_unread_notifications_count(user_id: int) -> int:
-    result = fetch_one("SELECT COUNT(*) FROM user_notifications WHERE user_id = ? AND read = 0", (str(user_id),))
-    return result[0] if result else 0
+    return db.user_notifications.count_documents({"user_id": str(user_id), "read": 0})
 
 # ---- BACKUPS ----
+from bson.binary import Binary
+
 def save_db_backup(guild_id: str, creator_id: str, name: str, data: bytes) -> None:
-    execute_query("INSERT INTO backups (guild_id, creator_id, name, data) VALUES (?, ?, ?, ?)", (str(guild_id), str(creator_id), name, data))
+    # MongoDB a une limite de 16MB par document. On vÃ©rifie ici.
+    if len(data) > 15 * 1024 * 1024:
+        raise ValueError("La sauvegarde est trop volumineuse (> 15MB)")
+
+    db.backups.insert_one({
+        "guild_id": str(guild_id),
+        "creator_id": str(creator_id),
+        "name": name,
+        "data": Binary(data), # Utilisation du type Binary de BSON pour l'optimisation
+        "created_at": datetime.now().isoformat()
+    })
 
 def get_user_backups(creator_id: str) -> List[tuple]:
-    return fetch_all("SELECT id, name, created_at, guild_id FROM backups WHERE creator_id = ? ORDER BY created_at DESC", (str(creator_id),))
+    # On ne rÃ©cupÃ¨re pas le champ 'data' ici pour Ã©conomiser de la bande passante
+    backups = db.backups.find({"creator_id": str(creator_id)}, {"data": 0}).sort("created_at", -1)
+    return [(str(b.get("_id")), b.get("name"), b.get("created_at"), b.get("guild_id")) for b in backups]
 
-def get_backup_data(backup_id: int) -> Optional[bytes]:
-    row = fetch_one("SELECT data FROM backups WHERE id = ?", (backup_id,))
-    return row[0] if row else None
-
-def delete_db_backup(backup_id: int, creator_id: str) -> bool:
-    # On vérifie que c'est bien le créateur qui supprime
-    row = fetch_one("SELECT 1 FROM backups WHERE id = ? AND creator_id = ?", (backup_id, str(creator_id)))
-    if row:
-        execute_query("DELETE FROM backups WHERE id = ?", (backup_id,))
-        return True
-    return False
+def get_backup_data(backup_id: str) -> Optional[bytes]:
+    from bson.objectid import ObjectId
+    try:
+        b = db.backups.find_one({"_id": ObjectId(backup_id)})
+        if b and "data" in b:
+            # MongoDB retourne un objet Binary, on le convertit en bytes
+            return bytes(b["data"])
+        return None
+    except: return None
+def delete_db_backup(backup_id: str, creator_id: str) -> bool:
+    from bson.objectid import ObjectId
+    try:
+        res = db.backups.delete_one({"_id": ObjectId(backup_id), "creator_id": str(creator_id)})
+        return res.deleted_count > 0
+    except: return False
 
 def update_db_structure():
-    """Migre la base de données pour ajouter les colonnes manquantes si nécessaire"""
-    with get_conn() as conn:
-        # Colonnes pour le message de départ
-        try:
-            conn.execute("ALTER TABLE guild_config ADD COLUMN leave_channel_id TEXT")
-        except sqlite3.OperationalError: pass
-        
-        try:
-            conn.execute("ALTER TABLE guild_config ADD COLUMN leave_message TEXT")
-        except sqlite3.OperationalError: pass
+    # Avec MongoDB, la structure est flexible, donc peu de choses à faire ici
+    pass
 
 init_db()
-update_db_structure()

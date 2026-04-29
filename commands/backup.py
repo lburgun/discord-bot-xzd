@@ -62,7 +62,7 @@ class BackupMainView(discord.ui.View):
         select = discord.ui.Select(placeholder="Choisissez une sauvegarde à gérer...", options=options)
         
         async def select_callback(inter: discord.Interaction):
-            backup_id = int(select.values[0])
+            backup_id = select.values[0] # C'est dÃ©jÃ  une string (ObjectId)
             await inter.response.edit_message(
                 content=f"⚙️ **Gestion de la sauvegarde #{backup_id}**", 
                 embed=None, 
