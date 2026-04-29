@@ -1,10 +1,11 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from database import init_db
 import os
 import asyncio
+import aiohttp
 from dotenv import load_dotenv
-from keep_alive import start_server, self_ping
+from keep_alive import start_server
 
 load_dotenv()
 
@@ -20,8 +21,9 @@ class MyBot(commands.Bot):
         
         # Démarrer le serveur web pour Render
         await start_server()
-        # Lancer le self-ping en tâche de fond
-        self.loop.create_task(self_ping())
+        
+        # Lancer le self-ping
+        self.self_ping.start()
         
         # Enregistrement des vues persistantes
         from commands.security import CaptchaView
@@ -38,6 +40,26 @@ class MyBot(commands.Bot):
                     print(f"✅ Extension chargée : {filename}")
                 except Exception as e:
                     print(f"❌ Erreur lors du chargement de {filename}: {str(e)}")
+
+    @tasks.loop(minutes=10)
+    async def self_ping(self):
+        """Ping l'URL externe de Render pour éviter la mise en veille"""
+        url = os.getenv("RENDER_EXTERNAL_URL")
+        if not url:
+            # Si l'URL n'est pas définie, on tente en local par défaut
+            url = "http://localhost:8080"
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        print(f"📡 Self-Ping réussi sur {url}")
+            except Exception as e:
+                print(f"⚠️ Échec du Self-Ping : {e}")
+
+    @self_ping.before_loop
+    async def before_self_ping(self):
+        await self.wait_until_ready()
 
     async def on_ready(self):
         print(f"---")
