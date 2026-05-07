@@ -159,38 +159,48 @@ class Inventory(commands.Cog):
                 total_value += shop_item["price"] * item_quantity
                 continue
 
-            # Si ce n'est pas un item du shop et que c'est un item avec rareté
-            if " " in item_name:
-                base_name, rarity = item_name.rsplit(" ", 1)
-                # Chercher dans le catalogue
-                found_item = None
-                item_category = None
-                for category, items in catalogue_items.items():
-                    for item in items:
-                        if item["name"] == base_name:
+            # Si ce n'est pas un item du shop, chercher dans le catalogue
+            found_item = None
+            item_category = None
+            item_rarity = None
+            
+            # Essayer de trouver par nom exact ou par format "Nom Rareté"
+            for category, items in catalogue_items.items():
+                for item in items:
+                    # Cas 1: Match direct (ex: "Smartphone")
+                    if item["name"] == item_name:
+                        found_item = item
+                        item_category = category
+                        item_rarity = "common" # Default if not specified
+                        break
+                    # Cas 2: Match avec rareté (ex: "Smartphone legendary")
+                    for r in item["rarities"]:
+                        if f"{item['name']} {r}" == item_name:
                             found_item = item
                             item_category = category
+                            item_rarity = r
                             break
-                    if found_item:
-                        break
+                    if found_item: break
+                if found_item: break
 
-                if found_item and rarity in found_item["variants"] and item_category:
-                    # Extraire la quantité
-                    if isinstance(quantity, dict):
-                        item_quantity = quantity.get("quantity", 0)
-                    else:
-                        item_quantity = quantity
+            if found_item and item_category:
+                # Extraire la quantité
+                if isinstance(quantity, dict):
+                    item_quantity = int(quantity.get("quantity", 0))
+                else:
+                    item_quantity = int(quantity)
 
-                    # Calculer la valeur
-                    item_value = found_item["price"] * item_quantity
-                    total_value += item_value
+                # Calculer la valeur
+                item_value = found_item["price"] * item_quantity
+                total_value += item_value
 
-                    # Ajouter l'item à sa catégorie
-                    item_text = (
-                        f"{found_item['emoji']} **{found_item['variants'][rarity]}**\n"
-                        f"└ {rarity_indicators[rarity]} × {item_quantity}"
-                    )
-                    categories[item_category].append(item_text)
+                # Ajouter l'item à sa catégorie
+                display_name = found_item["variants"].get(item_rarity, found_item["name"])
+                item_text = (
+                    f"{found_item['emoji']} **{display_name}**\n"
+                    f"└ {rarity_indicators.get(item_rarity, '⚪')} × {item_quantity}"
+                )
+                categories[item_category].append(item_text)
 
         # Créer la vue avec les catégories non vides
         categories = {k: v for k, v in categories.items() if v or k == "Tout"}

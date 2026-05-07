@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from database import execute_query, fetch_one, fetch_all, get_inventaire, update_inventaire
+from database import execute_query, fetch_one, fetch_all, get_inventaire, update_inventaire, get_user_wallet
 # import json  # Inutilisé
 
 shop_items = [
@@ -55,19 +55,15 @@ class ShopSelect(discord.ui.Select):
             return
 
         # Vérifier le solde de l'utilisateur
-        balance = fetch_one("SELECT wallet FROM users WHERE guild_id = ? AND user_id = ?", 
-                          (str(interaction.guild_id), str(interaction.user.id)))
-        if not balance:
-            await interaction.response.send_message("❌ Vous n'avez pas de compte. Utilisez +daily pour commencer.", ephemeral=True)
-            return
+        guild_id, user_id = str(interaction.guild_id), str(interaction.user.id)
+        wallet = get_user_wallet(guild_id, user_id)
 
-        wallet = balance[0]
         if wallet < item["price"]:
             await interaction.response.send_message(f"❌ Vous n'avez pas assez d'argent. Il vous manque {item['price'] - wallet} coins.", ephemeral=True)
             return
 
         # Vérifier les limites de quantité
-        inventory = get_inventaire(str(interaction.guild_id), str(interaction.user.id))
+        inventory = get_inventaire(guild_id, user_id)
         current_quantity = 0
         if item["name"] in inventory:
             if isinstance(inventory[item["name"]], dict):
@@ -85,7 +81,7 @@ class ShopSelect(discord.ui.Select):
 
             # Effectuer l'achat
             execute_query("UPDATE users SET wallet = wallet - ? WHERE guild_id = ? AND user_id = ?", 
-                         (item["price"], str(interaction.guild_id), str(interaction.user.id)))
+                         (item["price"], guild_id, user_id))
 
             # Mettre à jour l'inventaire
             if item["name"] == "Wagon":
@@ -99,14 +95,14 @@ class ShopSelect(discord.ui.Select):
                         inventory[item["name"]]["quantity"] += 1
                     else:
                         inventory[item["name"]] = {
-                            "quantity": inventory[item["name"]] + 1
+                            "quantity": int(inventory[item["name"]]) + 1
                         }
                 else:
                     inventory[item["name"]] = {
                         "quantity": 1
                     }
             
-            update_inventaire(str(interaction.guild_id), str(interaction.user.id), inventory)
+            update_inventaire(guild_id, user_id, inventory)
 
             # Mettre à jour l'embed avec le nouveau solde
             embed = discord.Embed(
@@ -124,13 +120,8 @@ class ShopSelect(discord.ui.Select):
                 )
 
             # Afficher le nouveau solde
-            new_balance = fetch_one("SELECT wallet FROM users WHERE guild_id = ? AND user_id = ?", 
-                                  (str(interaction.guild_id), str(interaction.user.id)))
-            if new_balance:
-                embed.add_field(name="💰 Votre solde", value=f"{new_balance[0]} coins", inline=False)
-                solde_restant = new_balance[0]
-            else:
-                solde_restant = 0
+            solde_restant = get_user_wallet(guild_id, user_id)
+            embed.add_field(name="💰 Votre solde", value=f"{solde_restant} coins", inline=False)
 
             # Créer une nouvelle vue avec un nouveau menu
             view = ShopView()
@@ -177,10 +168,8 @@ class Shop(commands.Cog):
             )
 
         # Afficher le solde actuel
-        balance = fetch_one("SELECT wallet FROM users WHERE guild_id = ? AND user_id = ?", 
-                          (str(ctx.guild.id), str(ctx.author.id)))
-        if balance:
-            embed.add_field(name="💰 Votre solde", value=f"{balance[0]} coins", inline=False)
+        wallet = get_user_wallet(str(ctx.guild.id), str(ctx.author.id))
+        embed.add_field(name="💰 Votre solde", value=f"{wallet} coins", inline=False)
 
         view = ShopView()
         await ctx.send(embed=embed, view=view)

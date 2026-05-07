@@ -39,10 +39,14 @@ class EntreprisePaginator(discord.ui.View):
         end = start + self.per_page
         for ent in self.entreprises[start:end]:
             owner_id, nom, tresorerie, tresorerie_max, visibilite, revenu_par_cycle, employee_count = ent
+            buildings = get_entreprise_buildings(self.guild_id, owner_id)
+            bureau = next((b for b in buildings if b["building_type"] == "bureau"), None)
+            max_employes = 10 + (5 * bureau["level"] if bureau else 0)
+            
             embed.add_field(
                 name=nom,
                 value = 
-                        f"👥 **Employés** : {employee_count} / 10\n"
+                        f"👥 **Employés** : {employee_count} / {max_employes}\n"
                         f"💰 **Trésorerie** : {tresorerie} / {tresorerie_max} coins\n"
                         f"🪙 **Distribution** : {revenu_par_cycle} coins\n"
                         f"🔒 **Visibilité** : {visibilite.capitalize()}",inline=False)
@@ -215,31 +219,120 @@ class BatimentsView(discord.ui.View):
 class BuildingSelect(discord.ui.Select):
     def __init__(self, bot, guild_id, owner_id, user_id, options):
         super().__init__(placeholder="Choisissez un bâtiment", options=options)
-        self.bot, self.guild_id, self.owner_id, self.user_id = bot, guild_id, owner_id, user_id
+        self.bot, self.guild_id, self.owner_id, self.user_id = bot, str(guild_id), str(owner_id), str(user_id)
 
     async def callback(self, interaction: discord.Interaction):
-        cost = get_building_cost(self.values[0], 1)
+        if str(interaction.user.id) != self.user_id:
+            return await interaction.response.send_message("❌ Pas ton menu.", ephemeral=True)
+            
+        b_type = self.values[0]
+        cost = get_building_cost(b_type, 1)
         treso = get_tresorerie_entreprise(self.guild_id, self.owner_id)
+        
         if cost > treso:
-            return await interaction.response.send_message(f"❌ Fonds insuffisants ({cost} coins requis).", ephemeral=True)
-        if add_building(self.guild_id, self.owner_id, self.values[0]):
+            return await interaction.response.send_message(f"❌ Fonds insuffisants ({cost:,} coins requis).", ephemeral=True)
+            
+        # Check max quantity
+        buildings = get_entreprise_buildings(self.guild_id, self.owner_id)
+        count = sum(1 for b in buildings if b["building_type"] == b_type)
+        max_qty = BUILDING_TYPES[b_type].get("max_quantity", 1)
+        if count >= max_qty:
+            return await interaction.response.send_message(f"❌ Tu possèdes déjà le nombre maximum autorisé de {BUILDING_TYPES[b_type]['nom']} ({max_qty}).", ephemeral=True)
+            
+        if add_building(self.guild_id, self.owner_id, b_type):
             update_tresorerie_entreprise(self.guild_id, self.owner_id, treso - cost)
-            await interaction.response.send_message(f"✅ Bâtiment acheté !", ephemeral=True)
+            await interaction.response.send_message(f"✅ Bâtiment **{BUILDING_TYPES[b_type]['nom']}** acheté !", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Erreur lors de l'achat.", ephemeral=True)
 
 class BuildingUpgradeSelect(discord.ui.Select):
     def __init__(self, bot, guild_id, owner_id, user_id, options):
         super().__init__(placeholder="Choisissez un bâtiment à améliorer", options=options)
-        self.bot, self.guild_id, self.owner_id, self.user_id = bot, guild_id, owner_id, user_id
+        self.bot, self.guild_id, self.owner_id, self.user_id = bot, str(guild_id), str(owner_id), str(user_id)
 
     async def callback(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.user_id:
+            return await interaction.response.send_message("❌ Pas ton menu.", ephemeral=True)
+            
         bid = int(self.values[0])
         cost = get_building_upgrade_cost(self.guild_id, self.owner_id, bid)
         treso = get_tresorerie_entreprise(self.guild_id, self.owner_id)
+        
         if cost > treso:
-            return await interaction.response.send_message(f"❌ Fonds insuffisants ({cost} coins requis).", ephemeral=True)
+            return await interaction.response.send_message(f"❌ Fonds insuffisants ({cost:,} coins requis).", ephemeral=True)
+
+        # Vérifier si l'or est requis (Niveau 5+)
+        from database import get_entreprise_buildings, get_building_gold_cost, get_inventaire, update_inventaire
+        buildings = get_entreprise_buildings(self.guild_id, self.owner_id)
+        building = next((b for b in buildings if b["building_id"] == bid), None)
+        
+        if not building:
+            return await interaction.response.send_message("❌ Bâtiment introuvable.", ephemeral=True)
+
+        next_level = building["level"] + 1
+        gold_cost = get_building_gold_cost(next_level)
+        
+        if gold_cost > 0:
+            inv = get_inventaire(self.guild_id, self.owner_id)
+            current_gold = 0
+            if "minerals" in inv and "Or" in inv["minerals"]:
+                current_gold = inv["minerals"]["Or"]
+                
+            if current_gold < gold_cost:
+                return await interaction.response.send_message(f"❌ Or insuffisant pour le niveau {next_level}. Il te faut {gold_cost} lingots d'Or (tu en as {current_gold}).", ephemeral=True)
+            
+            # Déduire l'or
+            inv["minerals"]["Or"] -= gold_cost
+            update_inventaire(self.guild_id, self.owner_id, inv)
+            
         if upgrade_building(self.guild_id, self.owner_id, bid):
             update_tresorerie_entreprise(self.guild_id, self.owner_id, treso - cost)
-            await interaction.response.send_message(f"✅ Bâtiment amélioré !", ephemeral=True)
+            msg = f"✅ Bâtiment amélioré au niveau {next_level} !"
+            if gold_cost > 0:
+                msg += f"\n*(Tu as utilisé {gold_cost} lingots d'Or pour cette amélioration technologique)*"
+            await interaction.response.send_message(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Erreur lors de l'amélioration.", ephemeral=True)
+
+class LaboView(discord.ui.View):
+    def __init__(self, bot: discord.Client, guild_id: str, owner_id: str, user_id: str):
+        super().__init__(timeout=60)
+        self.bot, self.guild_id, self.owner_id, self.user_id = bot, guild_id, owner_id, user_id
+
+    @discord.ui.button(label="💎 Acheter Brevet (1 Diamant, 2 Or)", style=discord.ButtonStyle.primary)
+    async def acheter_brevet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != str(self.owner_id):
+            return await interaction.response.send_message("❌ Seul le propriétaire peut faire ça.", ephemeral=True)
+
+        from database import get_entreprise_buildings, get_inventaire, update_inventaire
+        
+        buildings = get_entreprise_buildings(self.guild_id, self.owner_id)
+        has_lab = any(b["building_type"] == "laboratoire" for b in buildings)
+        if not has_lab:
+            return await interaction.response.send_message("❌ Tu dois d'abord construire un Laboratoire R&D pour débloquer les brevets.", ephemeral=True)
+
+        inv = get_inventaire(self.guild_id, self.owner_id)
+        current_diamonds = inv.get("minerals", {}).get("Diamant", 0)
+        current_gold = inv.get("minerals", {}).get("Or", 0)
+
+        if current_diamonds < 1 or current_gold < 2:
+            return await interaction.response.send_message(f"❌ Matériaux insuffisants. Il te faut 1 Diamant et 2 Or.\n(Tu as {current_diamonds} Diamant(s) et {current_gold} Or).", ephemeral=True)
+
+        from database import db
+        import datetime
+        
+        # Activer le brevet pour 24h
+        expiry = datetime.datetime.now() + datetime.timedelta(days=1)
+        db.entreprises.update_one(
+            {"guild_id": str(self.guild_id), "owner_id": str(self.owner_id)},
+            {"$set": {"patent_expiry": expiry.isoformat()}}
+        )
+
+        inv["minerals"]["Diamant"] -= 1
+        inv["minerals"]["Or"] -= 2
+        update_inventaire(self.guild_id, self.owner_id, inv)
+        
+        await interaction.response.send_message("✅ **Brevet débloqué !** Tous tes coûts de maintenance sont réduits à 0 pendant 24h !", ephemeral=True)
 
 class ParametresView(discord.ui.View):
     def __init__(self, bot, guild_id, owner_id, user_id):
@@ -313,14 +406,33 @@ class MenuEntrepriseSelect(ui.Select):
         elif choice == "Employés":
             employes = get_employes(self.guild_id, self.owner_id)
             embed = discord.Embed(title="👥 Employés", color=0x000000)
-            for e in employes: embed.add_field(name=f"ID: {e['employe_id']}", value=f"Rôle: {e['role']} | Salaire: {e['salaire']} | Work: {e['nb_work_effectues']}", inline=False)
-            view = GestionEmployeSelect(employes, self.bot, self.guild_id, self.owner_id, self.user_id) if str(self.user_id) == str(self.owner_id) else self.view
-            await interaction.response.edit_message(embed=embed, view=discord.ui.View().add_item(view) if str(self.user_id) == str(self.owner_id) else self.view)
+            
+            if not employes:
+                embed.description = "Vous n'avez pas encore d'employés."
+                return await interaction.response.edit_message(embed=embed, view=self.view)
+
+            for e in employes: 
+                embed.add_field(name=f"ID: {e['employe_id']}", value=f"Rôle: {e['role']} | Salaire: {e['salaire']} | Work: {e['nb_work_effectues']}", inline=False)
+            
+            if str(self.user_id) == str(self.owner_id):
+                new_view = discord.ui.View(timeout=60)
+                new_view.add_item(GestionEmployeSelect(employes, self.bot, self.guild_id, self.owner_id, self.user_id))
+                await interaction.response.edit_message(embed=embed, view=new_view)
+            else:
+                await interaction.response.edit_message(embed=embed, view=self.view)
 
         elif choice == "Bâtiments":
             embed = discord.Embed(title="🏢 Bâtiments", color=0x000000)
             buildings = get_entreprise_buildings(self.guild_id, self.owner_id)
-            for b in buildings: embed.add_field(name=f"{b['nom']} (Lv.{b['level']})", value=f"Rev: {b['revenue']} | Maint: {b['maintenance_cost']}", inline=False)
+            if not buildings:
+                embed.description = "Vous n'avez pas encore de bâtiments. Cliquez sur le bouton ci-dessous pour en acheter."
+            else:
+                for b in buildings: 
+                    embed.add_field(
+                        name=f"{b['nom']} (Lv.{b['level']})", 
+                        value=f"💰 Rev: `{b['revenue']}`\n🛠️ Maint: `{b['maintenance_cost']}`\n👷 Work: `{b['work_required']}`", 
+                        inline=False
+                    )
             await interaction.response.edit_message(embed=embed, view=BatimentsView(self.bot, self.guild_id, self.owner_id, self.user_id))
 
         elif choice == "Paramètres":

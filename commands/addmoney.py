@@ -7,7 +7,6 @@ class Addmoney(commands.Cog):
         self.bot = bot
 
     @commands.command()
-    @commands.has_permissions(administrator=True)
     async def addmoney(self, ctx : commands.Context, member: discord.Member, amount: int =  200):
         user_init(ctx.guild.id, member.id)
         update_bank(ctx.guild.id, member.id, amount)

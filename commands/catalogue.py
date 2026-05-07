@@ -1,7 +1,8 @@
 import discord
 from discord.ext import commands
 import random
-from database import execute_query, fetch_one, fetch_all, get_inventaire, update_inventaire
+from datetime import datetime
+from database import execute_query, fetch_one, fetch_all, get_inventaire, update_inventaire, get_user_wallet, update_wallet
 
 # Dictionnaire des catégories avec leurs émojis
 category_emojis = {
@@ -11,7 +12,8 @@ category_emojis = {
     "Art & Collection": "🎨",
     "Mode & Accessoires": "👔",
     "Animaux": "🐾",
-    "Sports & Loisirs": "⚽"
+    "Sports & Loisirs": "⚽",
+    "Sécurité & Armes": "🛡️"
 }
 
 # Indicateurs de rareté
@@ -417,171 +419,342 @@ catalogue_items = {
                 "legendary": "Instrument historique"
             }
         }
+    ],
+    "Sécurité & Armes": [
+        {
+            "name": "Coffre-fort",
+            "emoji": "🗄️",
+            "price": 25000,
+            "description": "Protège une partie de votre argent des voleurs",
+            "rarities": ["common", "uncommon", "rare", "epic", "legendary"],
+            "variants": {
+                "common": "Petit coffre",
+                "uncommon": "Coffre blindé",
+                "rare": "Coffre encastré",
+                "epic": "Coffre de banque",
+                "legendary": "Chambre forte"
+            }
+        },
+        {
+            "name": "Arme à feu",
+            "emoji": "🔫",
+            "price": 50000,
+            "description": "Permet de se défendre contre les voleurs (Permis requis !)",
+            "rarities": ["rare", "epic", "legendary"],
+            "variants": {
+                "rare": "Pistolet",
+                "epic": "Fusil",
+                "legendary": "Arme lourde"
+            }
+        },
+        {
+            "name": "Alarme",
+            "emoji": "🚨",
+            "price": 15000,
+            "description": "Prévient la police en cas d'intrusion",
+            "rarities": ["common", "uncommon", "rare", "epic"],
+            "variants": {
+                "common": "Alarme basique",
+                "uncommon": "Alarme connectée",
+                "rare": "Alarme laser",
+                "epic": "Système de sécurité IA"
+            }
+        }
     ]
 }
 
-class CatalogueView(discord.ui.View):
-    def __init__(self, categories, user_balance):
-        super().__init__(timeout=180)
-        self.current_category = 0
-        self.categories = list(categories.items())
-        self.user_balance = user_balance
-
-    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_category = (self.current_category - 1) % len(self.categories)
-        await self.update_embed(interaction)
-
-    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_category = (self.current_category + 1) % len(self.categories)
-        await self.update_embed(interaction)
-
-    async def update_embed(self, interaction: discord.Interaction):
-        category_name, items = self.categories[self.current_category]
+class PurchaseSelect(discord.ui.Select):
+    def __init__(self, items, category_name, multiplier):
+        self.multiplier = multiplier
+        self.category_name = category_name
         
-        embed = discord.Embed(
-            title=f"{category_emojis[category_name]} {category_name}",
-            description="💡 `+buy nom_de_l'objet` pour acheter • ⬅️ ➡️ pour naviguer",
-            color=0x000000
-        )
-
+        options = []
         for item in items:
-            field_text = f"Prix: {item['price']:,} coins\n{item['description']}\n\n"
-            for rarity in item["rarities"]:
-                field_text += f"{rarity_indicators[rarity]} {item['variants'][rarity]} ({rarity_chances[rarity]}%)\n"
-            
-            embed.add_field(
-                name=f"{item['emoji']} {item['name']}", 
-                value=field_text, 
-                inline=False
+            actual_price = int(item['price'] * multiplier)
+            options.append(
+                discord.SelectOption(
+                    label=f"{item['name']} - {actual_price:,} 💰",
+                    description=item['description'],
+                    emoji=item['emoji'],
+                    value=item["name"]
+                )
             )
+        super().__init__(placeholder="Choisissez un objet à acheter...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        item_name = self.values[0]
+        view: CatalogueView = self.view
         
-        embed.set_footer(text=f"Page {self.current_category + 1}/{len(self.categories)} • 💰 Votre solde: {self.user_balance:,} coins")
-        await interaction.response.edit_message(embed=embed, view=self)
-
-class Catalogue(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @commands.command(name="catalogue")
-    async def catalogue(self, ctx):
-        """Affiche le catalogue des objets disponibles"""
-        balance = fetch_one("SELECT wallet FROM users WHERE guild_id = ? AND user_id = ?",
-                          (str(ctx.guild.id), str(ctx.author.id)))
-        
-        user_balance = balance[0] if balance else 0
-
-        # Afficher la première catégorie
-        category_name, items = list(catalogue_items.items())[0]
-        
-        embed = discord.Embed(
-            title=f"{category_emojis[category_name]} {category_name}",
-            description="💡 `+buy nom_de_l'objet` pour acheter • ⬅️ ➡️ pour naviguer",
-            color=0x000000
-        )
-
-        for item in items:
-            field_text = f"Prix: {item['price']:,} coins\n{item['description']}\n\n"
-            for rarity in item["rarities"]:
-                field_text += f"{rarity_indicators[rarity]} {item['variants'][rarity]} ({rarity_chances[rarity]}%)\n"
+        # Trouver l'item
+        found_item = None
+        for category_items in catalogue_items.values():
+            for item in category_items:
+                if item["name"] == item_name:
+                    found_item = item
+                    break
+            if found_item: break
             
-            embed.add_field(
-                name=f"{item['emoji']} {item['name']}", 
-                value=field_text, 
-                inline=False
-            )
+        if not found_item:
+            await interaction.response.send_message("❌ Cet objet n'existe plus.", ephemeral=True)
+            return
 
-        embed.set_footer(text=f"Page 1/{len(catalogue_items)} • 💰 Votre solde: {user_balance:,} coins")
-        view = CatalogueView(catalogue_items, user_balance)
-        await ctx.send(embed=embed, view=view)
-
-    @commands.command(name="buy")
-    async def buy(self, ctx, *, item_name: str):
-        """Acheter un item du catalogue"""
-        # Vérifier si l'utilisateur a déjà un téléphone ou un wagon
-        inventory = get_inventaire(str(ctx.guild.id), str(ctx.author.id))
+        # Vérifier le solde
+        guild_id, user_id = str(interaction.guild_id), str(interaction.user.id)
+        wallet = get_user_wallet(guild_id, user_id)
         
-        # Vérifier si l'item est un téléphone ou un wagon
+        # Appliquer la fluctuation
+        actual_price = int(found_item["price"] * self.multiplier)
+
+        if wallet < actual_price:
+            await interaction.response.send_message(f"❌ Vous n'avez pas assez d'argent ! Il vous manque {actual_price - wallet:,} 💰", ephemeral=True)
+            return
+
+        # Vérification des doublons (phone/wagon)
+        inventory = get_inventaire(guild_id, user_id)
         is_phone = "phone" in item_name.lower() or "téléphone" in item_name.lower() or item_name.lower() == "smartphone"
         is_wagon = "wagon" in item_name.lower()
         
         if is_phone:
-            has_phone = any(("phone" in item.lower() or "téléphone" in item.lower() or item.lower() == "smartphone") for item in inventory.keys())
-            if has_phone:
-                embed = discord.Embed(title="❌ Achat impossible", description="Vous possédez déjà un téléphone ! Vendez-le d'abord si vous souhaitez en acheter un nouveau.", color=discord.Color.red())
-                await ctx.send(embed=embed)
+            if any(("phone" in k.lower() or "téléphone" in k.lower() or k.lower() == "smartphone") for k in inventory.keys()):
+                await interaction.response.send_message("❌ Vous possédez déjà un téléphone !", ephemeral=True)
                 return
-                
         if is_wagon:
-            has_wagon = any("wagon" in item.lower() for item in inventory.keys())
-            if has_wagon:
-                embed = discord.Embed(title="❌ Achat impossible", description="Vous possédez déjà un wagon ! Vendez-le d'abord si vous souhaitez en acheter un nouveau.", color=discord.Color.red())
-                await ctx.send(embed=embed)
+            if any("wagon" in k.lower() for k in inventory.keys()):
+                await interaction.response.send_message("❌ Vous possédez déjà un wagon !", ephemeral=True)
                 return
 
-        # Chercher l'item dans toutes les catégories
-        found_item = None
-        for category, items in catalogue_items.items():
-            for item in items:
-                if item['name'].lower() == item_name.lower():
-                    found_item = item
-                    break
-            if found_item:
+        # Vérifier si l'objet est sous commande de l'état
+        now = int(datetime.now().timestamp())
+        names_to_check = [found_item["name"]]
+        if "variants" in found_item:
+            names_to_check.extend(found_item["variants"].values())
+            
+        is_blocked = False
+        for name in names_to_check:
+            if fetch_one("SELECT order_id FROM state_orders WHERE guild_id = ? AND item_name = ? AND status = 'active' AND expires_at > ?", (guild_id, name, now)):
+                is_blocked = True
                 break
-
-        if not found_item:
-            await ctx.send("❌ Cet item n'existe pas dans le catalogue!")
+                
+        if is_blocked:
+            await interaction.response.send_message("❌ Cet objet est actuellement sous embargo de l'État (forte demande). Les usines sont en rupture de stock ! Essayez de l'acheter à d'autres joueurs sur le Marketplace (`+mp`).", ephemeral=True)
             return
 
-        # Vérifier le solde de l'utilisateur
-        balance = fetch_one("SELECT wallet FROM users WHERE guild_id = ? AND user_id = ?",
-                          (str(ctx.guild.id), str(ctx.author.id)))
-        
-        if not balance:
-            await ctx.send("❌ Vous n'avez pas de compte!")
-            return
-        
-        current_balance = balance[0]
-
-        if current_balance < found_item['price']:
-            await ctx.send(f"❌ Vous n'avez pas assez d'argent! Il vous manque {found_item['price'] - current_balance:,} 💰")
-            return
-
-        # Déterminer la rareté obtenue selon les probabilités
-        rarity_list = []
-        chance_list = []
-        for rarity in found_item["rarities"]:
-            rarity_list.append(rarity)
-            chance_list.append(rarity_chances[rarity])
-        
+        # Déterminer la rareté
+        rarity_list = found_item["rarities"]
+        chance_list = [rarity_chances[r] for r in rarity_list]
         obtained_rarity = random.choices(rarity_list, weights=chance_list)[0]
+        variant_name = found_item["variants"][obtained_rarity]
 
-        # Mettre à jour le solde
-        execute_query("UPDATE users SET wallet = wallet - ? WHERE guild_id = ? AND user_id = ?",
-                     (found_item['price'], str(ctx.guild.id), str(ctx.author.id)))
+        try:
+            # Effectuer l'achat
+            update_wallet(guild_id, user_id, -actual_price)
+            
+            # Mettre à jour l'inventaire
+            # On utilise le format interne "BaseName Rarity" pour que inventory.py le reconnaisse
+            internal_item_name = f"{found_item['name']} {obtained_rarity}"
+            
+            if internal_item_name in inventory:
+                if isinstance(inventory[internal_item_name], dict):
+                    inventory[internal_item_name]["quantity"] = int(inventory[internal_item_name].get("quantity", 0)) + 1
+                else:
+                    inventory[internal_item_name] = int(inventory[internal_item_name]) + 1
+            else:
+                inventory[internal_item_name] = {"quantity": 1, "rarity": obtained_rarity}
+            
+            update_inventaire(guild_id, user_id, inventory)
 
-        # Mettre à jour l'inventaire avec la variante obtenue
-        variant_name = f"{found_item['name']} {obtained_rarity}"  # Nom unique pour la variante
-        inventaire = get_inventaire(str(ctx.guild.id), str(ctx.author.id))
-        if variant_name in inventaire:
-            inventaire[variant_name] += 1
-        else:
-            inventaire[variant_name] = 1
+            # Message de succès (Public)
+            new_wallet = wallet - actual_price
+            view.user_balance = new_wallet
+            
+            embed_success = discord.Embed(
+                title="✨ Achat réussi !",
+                description=f"<@{interaction.user.id}> a obtenu : {found_item['emoji']} **{variant_name}**\nRareté : {rarity_indicators[obtained_rarity]}",
+                color=0x00FF00
+            )
+            embed_success.set_footer(text=f"Nouveau solde : {new_wallet:,} coins")
+            
+            # 1. On met à jour le catalogue (valide l'interaction)
+            await view.update_embed(interaction)
+            
+            # 2. On envoie la confirmation d'achat en followup
+            await interaction.followup.send(embed=embed_success)
+
+        except Exception as e:
+            print(f"Erreur achat catalogue: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Une erreur est survenue lors de l'achat.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Une erreur est survenue lors de l'achat.", ephemeral=True)
+
+class CatalogueView(discord.ui.View):
+    def __init__(self, categories, user_balance, fluctuations):
+        super().__init__(timeout=180)
+        self.current_category = 0
+        self.categories = list(categories.items())
+        self.user_balance = user_balance
+        self.fluctuations = fluctuations
+        self.add_purchase_select()
+
+    def add_purchase_select(self):
+        # Supprimer l'ancien select s'il existe
+        for item in self.children:
+            if isinstance(item, PurchaseSelect):
+                self.remove_item(item)
+                break
         
-        update_inventaire(str(ctx.guild.id), str(ctx.author.id), inventaire)
+        # Ajouter le select pour la catégorie actuelle
+        category_name, items = self.categories[self.current_category]
+        multiplier = self.fluctuations.get(category_name, 1.0)
+        self.add_item(PurchaseSelect(items, category_name, multiplier))
 
-        # Message de confirmation
+    @discord.ui.button(label="⬅️ Précédent", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_category = (self.current_category - 1) % len(self.categories)
+        self.add_purchase_select()
+        await self.update_embed(interaction)
+
+    @discord.ui.button(label="➡️ Suivant", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_category = (self.current_category + 1) % len(self.categories)
+        self.add_purchase_select()
+        await self.update_embed(interaction)
+
+    async def update_embed(self, interaction: discord.Interaction, from_callback=False):
+        category_name, items = self.categories[self.current_category]
+        multiplier = self.fluctuations.get(category_name, 1.0)
+        
+        fluc_str = ""
+        if multiplier > 1.0:
+            fluc_str = f" 📈 (+{int((multiplier - 1.0) * 100)}%)"
+        elif multiplier < 1.0:
+            fluc_str = f" 📉 (-{int((1.0 - multiplier) * 100)}%)"
+            
         embed = discord.Embed(
-            title="✨ Achat réussi!",
-            description=f"Vous avez obtenu : {found_item['emoji']} **{found_item['variants'][obtained_rarity]}**\n"
-                       f"Rareté : {rarity_indicators[obtained_rarity]}\n"
-                       f"Prix payé : {found_item['price']:,} 💰",
+            title=f"{category_emojis[category_name]} {category_name}{fluc_str}",
+            description="Utilisez le menu déroulant ci-dessous pour acheter un objet.\n*Les prix varient chaque jour selon la Bourse !*",
             color=0x000000
         )
-        embed.add_field(name="💰 Nouveau solde", value=f"{current_balance - found_item['price']:,} coins")
 
-        await ctx.send(embed=embed)
+        for item in items:
+            actual_price = int(item['price'] * multiplier)
+            price_display = f"**{actual_price:,}** 💰"
+            if multiplier != 1.0:
+                price_display += f" *(Base: {item['price']:,})*"
+                
+            field_text = f"Prix : {price_display}\n{item['description']}\n"
+            rarity_text = " ".join([f"{rarity_indicators[r]}" for r in item["rarities"]])
+            embed.add_field(
+                name=f"{item['emoji']} {item['name']}", 
+                value=f"{field_text}Raretés : {rarity_text}", 
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Page {self.current_category + 1}/{len(self.categories)} • 💰 Votre solde : {self.user_balance:,} coins")
+        
+        if from_callback:
+            # Si on vient du callback de l'achat, on utilise edit_original_response car interaction a déjà été répondue
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+from discord.ext import tasks
+from datetime import datetime, timedelta
+
+class Catalogue(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.ensure_tables_exist()
+        self.market_fluctuations_loop.start()
+
+    def ensure_tables_exist(self):
+        execute_query("CREATE TABLE IF NOT EXISTS market_fluctuations (guild_id TEXT, category TEXT, multiplier REAL, expires_at INTEGER, PRIMARY KEY (guild_id, category))")
+
+    def cog_unload(self):
+        self.market_fluctuations_loop.cancel()
+
+    @tasks.loop(hours=24)
+    async def market_fluctuations_loop(self):
+        now = int(datetime.now().timestamp())
+        # Récupérer toutes les guildes
+        guild_ids = [str(g.id) for g in self.bot.guilds]
+        
+        for guild_id in guild_ids:
+            try:
+                # Nettoyer les anciennes fluctuations
+                execute_query("DELETE FROM market_fluctuations WHERE guild_id = ? AND expires_at < ?", (guild_id, now))
+                
+                # Pour chaque catégorie, 30% de chance d'avoir une fluctuation
+                for category_name in category_emojis.keys():
+                    if random.random() < 0.3:
+                        # Fluctuation entre -20% et +20%
+                        multiplier = round(random.uniform(0.8, 1.2), 2)
+                        if multiplier == 1.0: continue
+                        
+                        expires = int((datetime.now() + timedelta(hours=24)).timestamp())
+                        
+                        # Update or insert
+                        existing = fetch_one("SELECT 1 FROM market_fluctuations WHERE guild_id = ? AND category = ?", (guild_id, category_name))
+                        if existing:
+                            execute_query("UPDATE market_fluctuations SET multiplier = ?, expires_at = ? WHERE guild_id = ? AND category = ?", (multiplier, expires, guild_id, category_name))
+                        else:
+                            execute_query("INSERT INTO market_fluctuations (guild_id, category, multiplier, expires_at) VALUES (?, ?, ?, ?)", (guild_id, category_name, multiplier, expires))
+            except Exception as e:
+                print(f"[Catalogue] Error updating fluctuations for guild {guild_id}: {e}")
+
+    @market_fluctuations_loop.before_loop
+    async def before_market_fluctuations(self):
+        await self.bot.wait_until_ready()
+
+    def get_fluctuations(self, guild_id: str) -> dict:
+        now = int(datetime.now().timestamp())
+        rows = fetch_all("SELECT category, multiplier FROM market_fluctuations WHERE guild_id = ? AND expires_at > ?", (guild_id, now))
+        fluctuations = {}
+        for r in rows:
+            fluctuations[r[0]] = float(r[1])
+        return fluctuations
+
+    @commands.command(name="catalogue")
+    async def catalogue(self, ctx):
+        """Affiche le catalogue des objets disponibles"""
+        guild_id = str(ctx.guild.id)
+        user_balance = get_user_wallet(ctx.guild.id, ctx.author.id)
+        fluctuations = self.get_fluctuations(guild_id)
+
+        # Afficher la première catégorie
+        category_name, items = list(catalogue_items.items())[0]
+        multiplier = fluctuations.get(category_name, 1.0)
+        
+        fluc_str = ""
+        if multiplier > 1.0:
+            fluc_str = f" 📈 (+{int((multiplier - 1.0) * 100)}%)"
+        elif multiplier < 1.0:
+            fluc_str = f" 📉 (-{int((1.0 - multiplier) * 100)}%)"
+        
+        embed = discord.Embed(
+            title=f"{category_emojis[category_name]} {category_name}{fluc_str}",
+            description="Utilisez le menu déroulant ci-dessous pour acheter un objet.\n*Les prix varient chaque jour selon la Bourse !*",
+            color=0x000000
+        )
+
+        for item in items:
+            actual_price = int(item['price'] * multiplier)
+            price_display = f"**{actual_price:,}** 💰"
+            if multiplier != 1.0:
+                price_display += f" *(Base: {item['price']:,})*"
+                
+            field_text = f"Prix : {price_display}\n{item['description']}\n"
+            rarity_text = " ".join([f"{rarity_indicators[r]}" for r in item["rarities"]])
+            embed.add_field(
+                name=f"{item['emoji']} {item['name']}", 
+                value=f"{field_text}Raretés : {rarity_text}", 
+                inline=False
+            )
+
+        embed.set_footer(text=f"Page 1/{len(catalogue_items)} • 💰 Votre solde : {user_balance:,} coins")
+        view = CatalogueView(catalogue_items, user_balance, fluctuations)
+        await ctx.send(embed=embed, view=view)
+
 
 async def setup(bot):
-    await bot.add_cog(Catalogue(bot)) 
+    await bot.add_cog(Catalogue(bot))

@@ -14,16 +14,31 @@ class Bank(commands.Cog):
             color=color
         )
 
-    def create_error_embed(self, description: str) -> discord.Embed:
+    def create_error_embed(self, description: str, color: int = 0x000000) -> discord.Embed:
         """Crée un embed d'erreur."""
         return discord.Embed(
             description=description,
-            color=0x000000
+            color=color
         )
 
-    @commands.command(aliases=["with", "retirer"])
+    def is_ddosed(self, guild_id: str, user_id: str) -> bool:
+        from database import get_user_ddos
+        import datetime
+        ddos = get_user_ddos(guild_id, user_id)
+        if ddos:
+            try:
+                if datetime.datetime.now() < datetime.datetime.fromisoformat(ddos):
+                    return True
+            except: pass
+        return False
+
+    @commands.command(name="with", aliases=["retirer"])
     async def with_(self, ctx, amount: str):
         user_id = ctx.author.id
+        
+        if self.is_ddosed(str(ctx.guild.id), str(user_id)):
+            return await ctx.reply(embed=self.create_error_embed("❌ Erreur Réseau : Votre connexion à la banque est bloquée (DDoS en cours).", discord.Color.red()))
+
         user_init(ctx.guild.id, user_id)
 
         user = get_wallet_bank(ctx.guild.id, user_id)
@@ -39,8 +54,8 @@ class Bank(commands.Cog):
         if amount > user["bank"]:
             return await ctx.reply(embed=self.create_error_embed("Tu n'as pas autant dans ta banque."))
 
-        update_bank(ctx.guild.id,user_id, -amount)
-        update_wallet(ctx.guild.id,user_id, amount)
+        update_bank(ctx.guild.id, user_id, -amount)
+        update_wallet(ctx.guild.id, user_id, amount)
 
         embed = self.create_transaction_embed(
             "💸 Retrait effectué",
@@ -51,6 +66,10 @@ class Bank(commands.Cog):
     @commands.command(aliases=["dep"])
     async def deposit(self, ctx, amount: str):
         user_id = ctx.author.id
+        
+        if self.is_ddosed(str(ctx.guild.id), str(user_id)):
+            return await ctx.reply(embed=self.create_error_embed("❌ Erreur Réseau : Votre connexion à la banque est bloquée (DDoS en cours).", discord.Color.red()))
+
         user_init(ctx.guild.id, user_id)
 
         user = get_wallet_bank(ctx.guild.id, user_id)

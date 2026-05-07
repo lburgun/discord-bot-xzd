@@ -51,7 +51,6 @@ class Config(commands.Cog):
         self.bot = bot
 
     @commands.command(name="setup_captcha")
-    @commands.has_permissions(administrator=True)
     async def setup_captcha(self, ctx, channel_input: str, role_input: str):
         """Configure le système de captcha (ID ou Mention)"""
         channel = ctx.guild.get_channel(int(channel_input.strip('<#> '))) if not channel_input.isdigit() else ctx.guild.get_channel(int(channel_input))
@@ -61,7 +60,6 @@ class Config(commands.Cog):
         await ctx.send(f"✅ Captcha configuré dans {channel.mention} avec le rôle **{role.name}**")
 
     @commands.command(name="setup_tickets")
-    @commands.has_permissions(administrator=True)
     async def setup_tickets(self, ctx, category_input: str):
         """Configure la catégorie des tickets (ID recommandé)"""
         category = ctx.guild.get_channel(int(category_input)) if category_input.isdigit() else discord.utils.get(ctx.guild.categories, name=category_input)
@@ -71,7 +69,6 @@ class Config(commands.Cog):
         await ctx.send(f"✅ Catégorie des tickets : **{category.name}**")
 
     @commands.command(name="ticket_roles")
-    @commands.has_permissions(administrator=True)
     async def ticket_roles(self, ctx):
         """Gère les rôles qui peuvent voir et répondre aux tickets"""
         config = get_config(ctx.guild.id) or {}
@@ -92,7 +89,6 @@ class Config(commands.Cog):
         await ctx.send(embed=embed, view=SupportConfigView(ctx.guild.id))
 
     @commands.command(name="setup_voice")
-    @commands.has_permissions(administrator=True)
     async def setup_voice(self, ctx, channel_input: str):
         """Définit le salon générateur de vocaux"""
         channel = ctx.guild.get_channel(int(channel_input.strip('<#> '))) if not channel_input.isdigit() else ctx.guild.get_channel(int(channel_input))

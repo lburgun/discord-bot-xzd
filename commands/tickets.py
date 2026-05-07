@@ -99,7 +99,6 @@ class Tickets(commands.Cog):
         self.bot = bot
 
     @commands.command(name="send_ticket_panel")
-    @commands.has_permissions(administrator=True)
     async def send_ticket_panel(self, ctx):
         """Envoie le panneau de tickets"""
         embed = discord.Embed(

@@ -23,7 +23,7 @@ class Voice(commands.Cog):
                 category=category,
                 overwrites={
                     member.guild.default_role: discord.PermissionOverwrite(connect=True),
-                    member: discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True)
+                    member: discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True, manage_messages=True)
                 }
             )
             await member.move_to(new_channel)

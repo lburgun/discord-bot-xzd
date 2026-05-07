@@ -1,9 +1,144 @@
-import random
-from datetime import datetime, timedelta
 import discord
 from discord.ext import commands
-from database import update_job, user_init , get_job_data
+from database import update_job, user_init, get_job_data
 from .work import JOBS, unlock_cost, STARTING_JOBS_COUNT
+
+class JobsView(discord.ui.View):
+    def __init__(self, ctx, bot, job_data):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.bot = bot
+        self.job_data = job_data
+        self.user_id = ctx.author.id
+        self.guild_id = ctx.guild.id
+        
+        self.selected_job = None
+        
+        # Build options for select
+        options = []
+        unlocked = [j.lower() for j in job_data.get("unlocked_jobs", [])]
+        for i, (name, gain) in enumerate(JOBS):
+            cost = unlock_cost(i) if i >= STARTING_JOBS_COUNT else 0
+            is_unlocked = name.lower() in unlocked
+            status = "🟢" if is_unlocked else "🔒"
+            desc = f"Gain: {gain} coins | Déjà débloqué" if is_unlocked else f"Gain: {gain} coins | Coût: {cost} pts"
+            
+            options.append(discord.SelectOption(
+                label=name,
+                description=desc,
+                emoji=status,
+                value=str(i)
+            ))
+            
+        self.select = discord.ui.Select(placeholder="Sélectionne un métier pour voir les options...", options=options, row=0)
+        self.select.callback = self.select_callback
+        self.add_item(self.select)
+        
+        self.action_btn = discord.ui.Button(label="S'équiper / Acheter", style=discord.ButtonStyle.secondary, disabled=True, row=1)
+        self.action_btn.callback = self.action_callback
+        self.add_item(self.action_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Ce n'est pas ton menu !", ephemeral=True)
+            return False
+        return True
+
+    async def select_callback(self, interaction: discord.Interaction):
+        job_index = int(self.select.values[0])
+        self.selected_job = job_index
+        job_name, _ = JOBS[job_index]
+        
+        # Refresh job data
+        user_init(self.guild_id, self.user_id)
+        self.job_data = get_job_data(self.guild_id, self.user_id)
+        unlocked = [j.lower() for j in self.job_data.get("unlocked_jobs", [])]
+        
+        if job_name.lower() in unlocked:
+            if self.job_data.get("current_job", "").lower() == job_name.lower():
+                self.action_btn.label = "Déjà équipé"
+                self.action_btn.style = discord.ButtonStyle.secondary
+                self.action_btn.disabled = True
+            else:
+                self.action_btn.label = "S'équiper"
+                self.action_btn.style = discord.ButtonStyle.success
+                self.action_btn.disabled = False
+        else:
+            cost = unlock_cost(job_index)
+            self.action_btn.label = f"Acheter ({cost} pts)"
+            self.action_btn.style = discord.ButtonStyle.primary
+            self.action_btn.disabled = self.job_data.get("knowledge", 0) < cost
+            
+        await interaction.response.edit_message(view=self)
+        
+    async def action_callback(self, interaction: discord.Interaction):
+        if self.selected_job is None: return
+        
+        job_index = self.selected_job
+        job_name, _ = JOBS[job_index]
+        
+        # Refresh data
+        user_init(self.guild_id, self.user_id)
+        self.job_data = get_job_data(self.guild_id, self.user_id)
+        unlocked = [j.lower() for j in self.job_data.get("unlocked_jobs", [])]
+        knowledge = self.job_data.get("knowledge", 0)
+        
+        embed = self.build_embed()
+        
+        if job_name.lower() in unlocked:
+            # Equip
+            update_job(self.guild_id, self.user_id, "current_job", job_name)
+            self.job_data["current_job"] = job_name
+            
+            embed = self.build_embed()
+            embed.description += f"\n\n✅ Tu travailles désormais en tant que **{job_name}**."
+            
+            self.action_btn.label = "Déjà équipé"
+            self.action_btn.style = discord.ButtonStyle.secondary
+            self.action_btn.disabled = True
+        else:
+            # Buy
+            cost = unlock_cost(job_index)
+            if knowledge >= cost:
+                update_job(self.guild_id, self.user_id, "knowledge", knowledge - cost)
+                
+                unlocked_original = self.job_data.get("unlocked_jobs", [])
+                unlocked_original.append(job_name.lower())
+                update_job(self.guild_id, self.user_id, "unlocked_jobs", unlocked_original)
+                
+                self.job_data["knowledge"] = knowledge - cost
+                self.job_data["unlocked_jobs"] = unlocked_original
+                
+                embed = self.build_embed()
+                embed.description += f"\n\n🎉 Tu as débloqué le métier **{job_name}** !"
+                
+                self.action_btn.label = "S'équiper"
+                self.action_btn.style = discord.ButtonStyle.success
+                self.action_btn.disabled = False
+                
+                # Update select options visually
+                for opt in self.select.options:
+                    if opt.value == str(job_index):
+                        opt.emoji = "🟢"
+                        opt.description = f"Gain: {JOBS[job_index][1]} coins | Déjà débloqué"
+            else:
+                await interaction.response.send_message("❌ Pas assez de points.", ephemeral=True)
+                return
+                
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    def build_embed(self):
+        current = self.job_data.get("current_job", "Inconnu")
+        knowledge = self.job_data.get("knowledge", 0)
+        return discord.Embed(
+            title="🔧 Gestion des métiers",
+            description=(
+                f"**Métier actuel :** {current.capitalize()}\n"
+                f"🎓 Points de connaissance : {knowledge}\n"
+                f"\n*Utilise le menu ci-dessous pour changer de métier ou en acheter de nouveaux.*"
+            ),
+            color=0x000000
+        )
 
 class Jobs(commands.Cog):
     def __init__(self, bot):
@@ -11,145 +146,13 @@ class Jobs(commands.Cog):
 
     def _get_user_job_data(self, guild_id, user_id):
         user_init(guild_id, user_id)
-        user = get_job_data(guild_id, user_id)
-        job_data = user
+        return get_job_data(guild_id, user_id)
 
-        return job_data, user
-
-    @commands.group(name = "job", invoke_without_command=True)  # Commande principale : +job
+    @commands.command(name="job", aliases=["jobs"])
     async def job(self, ctx):
-        user_id = ctx.author.id
-        job_data, _ = self._get_user_job_data(ctx.guild.id, user_id)
-        knowledge = job_data["knowledge"]
-        current = job_data["current_job"]
-
-        embed = discord.Embed(
-            title="🔧 Gestion des métiers",
-            description=(
-                f"**Métier actuel :** {current.capitalize()}\n"
-                f"🎓 Points de connaissance : {knowledge}\n"
-            ),
-            color=0x000000
-        )
-        await ctx.reply(embed=embed)
-
-    @job.command(name="change")
-    async def change(self, ctx, *, job_name: str = None):
-        if not job_name:
-            await ctx.reply(embed=discord.Embed(
-                title="❌ Nom manquant",
-                description="Tu dois préciser un nom de métier.",
-                color=0x000000
-            ))
-            return
-
-        user_id = ctx.author.id
-        job_data, _ = self._get_user_job_data(ctx.guild.id, user_id)
-        unlocked = job_data["unlocked_jobs"]
-        job_indices = {name.lower(): i for i, (name, _) in enumerate(JOBS)}
-        job_index = job_indices.get(job_name.lower())
-
-        if job_index is None:
-            await ctx.reply(embed=discord.Embed(
-                title="❌ Métier inconnu",
-                description="Ce métier n'existe pas.",
-                color=0x000000
-            ))
-            return
-
-        job_real_name = JOBS[job_index][0]
-
-        if job_real_name.lower() not in unlocked:
-            await ctx.reply(embed=discord.Embed(
-                title="🔒 Métier non débloqué",
-                description="Tu n'as pas débloqué ce métier.",
-                color=0x000000
-            ))
-            return
-
-        update_job(ctx.guild.id, user_id, "current_job", job_real_name)
-        await ctx.reply(embed=discord.Embed(
-            title="✅ Changement de métier",
-            description=f"Tu travailles désormais en tant que **{job_real_name}**.",
-            color=0x000000
-        ))
-
-    @job.command(name="buy")                                           
-    async def buy(self, ctx, *, job_name: str = None):
-        if not job_name:
-            await ctx.reply(embed=discord.Embed(
-                title="❌ Nom manquant",
-                description="Tu dois préciser un nom de métier.",
-                color=0x000000
-            ))
-            return
-
-        user_id = ctx.author.id
-        job_data, _ = self._get_user_job_data(ctx.guild.id, user_id)
-        unlocked = job_data["unlocked_jobs"]
-        knowledge = job_data["knowledge"]
-
-        job_indices = {name.lower(): i for i, (name, _) in enumerate(JOBS)}
-        job_index = job_indices.get(job_name.lower())
-
-        if job_index is None:
-            await ctx.reply(embed=discord.Embed(
-                title="❌ Métier inconnu",
-                description="Ce métier n'existe pas.",
-                color=0x000000
-            ))
-            return
-
-        job_real_name = JOBS[job_index][0]
-
-        if job_real_name in unlocked:
-            await ctx.reply(embed=discord.Embed(
-                title="❌ Déjà débloqué",
-                description="Tu as déjà débloqué ce métier.",
-                color=0x000000
-            ))
-            return
-
-        cost = unlock_cost(job_index)
-        if knowledge < cost:
-            await ctx.reply(embed=discord.Embed(
-                title="❌ Pas assez de points",
-                description=f"Il te faut **{cost}** points de connaissance pour débloquer ce métier.",
-                color=0x000000
-            ))
-            return
-
-        unlocked.append(job_real_name.lower())
-        update_job(ctx.guild.id, user_id, "knowledge", max(0, knowledge - cost))
-        update_job(ctx.guild.id, user_id, "unlocked_jobs", unlocked)
-
-        await ctx.reply(embed=discord.Embed(
-            title="🎉 Nouveau métier débloqué !",
-            description=f"Tu as débloqué le métier **{job_real_name}**.",
-            color=0x000000
-        ))
-
-
-    @job.command(name="list")
-    async def list(self, ctx):
-        user_id = ctx.author.id
-        job_data, _ = self._get_user_job_data(ctx.guild.id, user_id)
-        unlocked_jobs = job_data["unlocked_jobs"]
-        embed = discord.Embed(
-            title="📋 Liste des métiers",
-            description="Voici les métiers disponibles et leur coût en points de connaissance.",
-            color=0x000000
-        )
-
-        lines = []
-        for i, (name, gain) in enumerate(JOBS):
-            cost = unlock_cost(i) if i >= STARTING_JOBS_COUNT else 0
-            locked = "🟢" if name.lower() in unlocked_jobs else "🔒"
-            lines.append(f"{locked} **{name}** — Gain: {gain} coins — Déblocage: {cost} pts")
-
-        embed.add_field(name="Métiers", value="\n".join(lines), inline=False)
-        await ctx.reply(embed=embed)
-
+        job_data = self._get_user_job_data(ctx.guild.id, ctx.author.id)
+        view = JobsView(ctx, self.bot, job_data)
+        await ctx.reply(embed=view.build_embed(), view=view)
 
 async def setup(bot):
     await bot.add_cog(Jobs(bot))

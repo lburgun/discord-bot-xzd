@@ -268,12 +268,13 @@ class MinerCog(commands.Cog):
         return minerals
 
     @commands.command()
+    @commands.cooldown(1, 43200, commands.BucketType.user)  
     async def miner(self, ctx):
         """Miner des minerais avec votre wagon"""
         # Vérifier si l'utilisateur a un wagon
         inventory = get_inventaire(str(ctx.guild.id), str(ctx.author.id))
         if "Wagon" not in inventory:
-            await ctx.send("❌ Vous n'avez pas de wagon ! Utilisez +buy pour en acheter un.")
+            await ctx.send("❌ Vous n'avez pas de wagon ! Utilisez +shop pour en acheter un.")
             return
 
         wagon = inventory["Wagon"]
@@ -317,6 +318,22 @@ class MinerCog(commands.Cog):
 
         embed.set_footer(text=f"Utilisations restantes du wagon : {wagon['uses_left']}/10")
         await ctx.send(embed=embed)
+
+    @miner.error
+    async def miner_error(self, ctx, error):
+        if isinstance(error, commands.CommandOnCooldown):
+            seconds = int(error.retry_after)
+            hours, remainder = divmod(seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m {seconds}s"
+            
+            embed = discord.Embed(
+                description=f"⏳ Tes bras sont fatigués... Patiente encore {time_str} avant de retourner à la mine.",
+                color=discord.Color.red()
+            )
+            await ctx.reply(embed=embed)
+        else:
+            raise error
 
     @commands.command()
     async def wagon(self, ctx):

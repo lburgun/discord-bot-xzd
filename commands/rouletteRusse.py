@@ -82,9 +82,29 @@ class RouletteRusse(commands.Cog):
                 await msg.edit(embed=new_embed)
                 await interaction.response.send_message("✅ Tu as rejoint la partie !", ephemeral=True)
 
+            async def start_callback(interaction: discord.Interaction, game_id=game_id):
+                game = self.games.get(game_id)
+                if not game:
+                    return await interaction.response.send_message("❌ Cette partie n'existe plus.", ephemeral=True)
+                if interaction.user != ctx.author:
+                    return await interaction.response.send_message("❌ Seul le créateur de la partie peut la lancer.", ephemeral=True)
+                if len(game["players"]) < 2:
+                    return await interaction.response.send_message("❌ Il faut au moins 2 joueurs pour commencer.", ephemeral=True)
+                
+                view.stop()
+                await interaction.response.defer()
+                await start_game(ctx, game["players"], game["bet"], msg)
+                if game_id in self.games:
+                    del self.games[game_id]
+
             join_btn = discord.ui.Button(label="🔫 Rejoindre", style=discord.ButtonStyle.gray)
             join_btn.callback = join_callback
+            
+            start_btn = discord.ui.Button(label="▶️ Lancer la partie", style=discord.ButtonStyle.success)
+            start_btn.callback = start_callback
+            
             view.add_item(join_btn)
+            view.add_item(start_btn)
             view.on_timeout = on_timeout
 
             msg = await ctx.send(embed=embed, view=view)
@@ -113,13 +133,11 @@ async def start_game(ctx, players, bet, message):
     previous_player = None
 
     while len(players) > 1:
+        # Re-vérifier l'index car des joueurs peuvent être supprimés
+        if current >= len(players):
+            current = 0
+            
         player = players[current]
-
-        if previous_player == player:
-            current = (current + 1) % len(players)
-            continue
-
-        previous_player = player
         spin_choice = {"value": None}
         selected_target = {"value": None}
         spin_view = discord.ui.View(timeout=20)
@@ -213,6 +231,9 @@ async def start_game(ctx, players, bet, message):
             )
             players.remove(target)
             dead.append(target)
+            # Recharger le barillet après un mort
+            barrel = [False] * 5 + [True]
+            random.shuffle(barrel)
         else:
             embed = discord.Embed(
                 title="😅 Ouf !",
@@ -223,7 +244,11 @@ async def start_game(ctx, players, bet, message):
         await message.edit(embed=embed, view=None)
         await asyncio.sleep(2)
 
+        # Si on survit à un tir sur soi-même, on peut rejouer
         if not bullet and target == player:
+            if not barrel: # Sécurité
+                barrel = [False] * 5 + [True]
+                random.shuffle(barrel)
             continue
 
         current = (current + 1) % len(players)

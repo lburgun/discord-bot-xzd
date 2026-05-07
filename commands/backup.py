@@ -11,8 +11,7 @@ class Backup(commands.Cog):
         self.bot = bot
 
     @commands.command(name="backup")
-    @commands.has_permissions(administrator=True)
-    async def backup_cmd(self, ctx):
+    async def backup(self, ctx):
         """Menu de gestion des sauvegardes personnelles (Structure complète)"""
         embed = discord.Embed(
             title="💎 Système de Sauvegarde Avancé",

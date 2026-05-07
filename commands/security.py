@@ -83,7 +83,6 @@ class Security(commands.Cog):
         self.bot = bot
 
     @commands.command(name="send_captcha_panel")
-    @commands.has_permissions(administrator=True)
     async def send_captcha_panel(self, ctx):
         """Envoie le panneau de vérification dans ce salon"""
         embed = discord.Embed(

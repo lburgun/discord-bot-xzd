@@ -60,7 +60,6 @@ class LFG(commands.Cog):
         self.bot = bot
 
     @commands.command(name="lfg_create")
-    @commands.has_permissions(manage_messages=True)
     async def lfg_create(self, ctx):
         """Crée un panneau de recherche de joueurs"""
         view = LFGView()
