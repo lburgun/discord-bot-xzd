@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
-from database import add_warning, get_warnings, clear_warnings
+from database import add_warning, get_warnings, clear_warnings, get_config
 import datetime
 import re
+from datetime import timedelta
 
 class WarnDMView(discord.ui.View):
     def __init__(self, member, moderator, reason, count, guild_name):
@@ -60,9 +61,23 @@ class Moderation(commands.Cog):
         if unit == "d": return datetime.timedelta(days=amount)
         return None
 
+    async def check_hierarchy(self, ctx, member: discord.Member):
+        if ctx.guild.owner == member:
+            await ctx.send("❌ Vous ne pouvez pas sanctionner le propriétaire du serveur.")
+            return False
+        if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            await ctx.send("❌ Vous ne pouvez pas sanctionner ce membre car son rôle est égal ou supérieur au vôtre.")
+            return False
+        if member == ctx.author:
+            await ctx.send("❌ Vous ne pouvez pas vous sanctionner vous-même.")
+            return False
+        return True
+
     @commands.command(name="kick")
     @commands.has_permissions(kick_members=True)
     async def kick(self, ctx, member: discord.Member, *, reason: str = "Aucune raison fournie"):
+        if not await self.check_hierarchy(ctx, member):
+            return
         try:
             await member.kick(reason=reason)
             await ctx.send(f"✅ **{member}** a été expulsé. Raison : {reason}")
@@ -72,30 +87,72 @@ class Moderation(commands.Cog):
     @commands.command(name="ban")
     @commands.has_permissions(ban_members=True)
     async def ban(self, ctx, member: discord.Member, *, reason: str = "Aucune raison fournie"):
+        if not await self.check_hierarchy(ctx, member):
+            return
         try:
             await member.ban(reason=reason)
             await ctx.send(f"✅ **{member}** a été banni. Raison : {reason}")
         except Exception as e:
             await ctx.send(f"❌ Erreur : {e}")
 
-    @commands.command(name="mute")
+    @commands.command(name="mute", aliases=["timeout"])
     @commands.has_permissions(moderate_members=True)
-    async def mute(self, ctx, member: discord.Member, duration: str, *, reason: str = "Aucune raison fournie"):
-        """Met un membre en sourdine (Timeout). Ex: +mute @user 1h raison"""
-        td = self.parse_duration(duration)
-        if not td:
-            return await ctx.send("❌ Format de durée invalide. Utilisez `10s`, `15m`, `1h`, `1d`.")
+    async def mute(self, ctx, member: discord.Member, duration_or_reason: str = "10m", *, reason: str = None):
+        """Mute (Timeout) un membre pour une durée."""
+        if not await self.check_hierarchy(ctx, member):
+            return
+            
+        import re
         
-        if td > datetime.timedelta(days=28):
+        match = re.match(r"^(\d+)([a-zA-Z]+)$", duration_or_reason.lower())
+        
+        actual_reason = reason or "Aucune raison fournie"
+        delta = None
+        duration_display = ""
+        
+        if match:
+            value = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit in ["s", "sec", "secondes"]:
+                delta = timedelta(seconds=value)
+                duration_display = f"{value} secondes"
+            elif unit in ["m", "min", "minutes"]:
+                delta = timedelta(minutes=value)
+                duration_display = f"{value} minutes"
+            elif unit in ["h", "hr", "heures"]:
+                delta = timedelta(hours=value)
+                duration_display = f"{value} heures"
+            elif unit in ["j", "d", "jour", "jours"]:
+                delta = timedelta(days=value)
+                duration_display = f"{value} jours"
+            elif unit in ["w", "semaine", "semaines"]:
+                delta = timedelta(weeks=value)
+                duration_display = f"{value} semaines"
+            elif unit in ["mo", "mois"]:
+                delta = timedelta(days=value * 30)
+                duration_display = f"{value} mois"
+            elif unit in ["a", "y", "an", "ans", "annee", "annees"]:
+                delta = timedelta(days=value * 365)
+                duration_display = f"{value} ans"
+                
+        elif duration_or_reason.isdigit():
+            value = int(duration_or_reason)
+            delta = timedelta(minutes=value)
+            duration_display = f"{value} minutes"
+            
+        if delta is None:
+            delta = timedelta(minutes=10)
+            duration_display = "10 minutes"
+            actual_reason = duration_or_reason + (f" {reason}" if reason else "")
+
+        if delta > timedelta(days=28):
             return await ctx.send("❌ La durée maximale est de 28 jours.")
 
         try:
-            await member.timeout(td, reason=reason)
-            embed = discord.Embed(
-                description=f"✅ **{member}** a été réduit au silence pendant **{duration}**.\n**Raison :** {reason}",
-                color=0x2b2d31
-            )
-            await ctx.send(embed=embed)
+            time = discord.utils.utcnow() + delta
+            await member.timeout(time, reason=actual_reason)
+            await ctx.send(f"✅ **{member}** a été rendu muet pour {duration_display}. Raison : {actual_reason}")
         except Exception as e:
             await ctx.send(f"❌ Erreur : {e}")
 
@@ -112,6 +169,9 @@ class Moderation(commands.Cog):
     @commands.command(name="warn")
     @commands.has_permissions(manage_messages=True)
     async def warn(self, ctx, member: discord.Member, *, reason: str):
+        if not await self.check_hierarchy(ctx, member):
+            return
+            
         add_warning(ctx.guild.id, member.id, ctx.author.id, reason)
 
         warns = get_warnings(ctx.guild.id, member.id)
@@ -130,21 +190,33 @@ class Moderation(commands.Cog):
         await ctx.send(embed=embed, view=view)
 
         # Sanctions automatiques
-        if count == 3:
-            try:
-                await member.timeout(datetime.timedelta(hours=2), reason="Automod: 3 avertissements")
-                await ctx.send(f"🤐 {member.mention} a reçu un **Mute automatique de 2h** pour avoir atteint 3 warns.")
-            except: pass
-        elif count == 5:
-            try:
-                await member.kick(reason="Automod: 5 avertissements")
-                await ctx.send(f"👢 {member.mention} a été **expulsé** pour avoir atteint 5 warns.")
-            except: pass
-        elif count >= 10:
-            try:
-                await member.ban(reason="Automod: 10 avertissements")
-                await ctx.send(f"🚫 {member.mention} a été **banni définitivement** pour avoir atteint 10 warns.")
-            except: pass
+        config = get_config(ctx.guild.id) or {}
+        warn_enabled = config.get("automod_warn_enabled") == "True"
+
+        if warn_enabled:
+            if count == 3:
+                try:
+                    await member.timeout(datetime.timedelta(hours=2), reason="Automod: 3 avertissements")
+                    await ctx.send(f"🤐 {member.mention} a reçu un **Mute automatique de 2h** pour avoir atteint 3 warns.")
+                except: pass
+            elif count == 5:
+                try:
+                    await member.kick(reason="Automod: 5 avertissements")
+                    await ctx.send(f"👢 {member.mention} a été **expulsé** pour avoir atteint 5 warns.")
+                except: pass
+            elif count >= 10:
+                try:
+                    await member.ban(reason="Automod: 10 avertissements")
+                    await ctx.send(f"🚫 {member.mention} a été **banni définitivement** pour avoir atteint 10 warns.")
+                except: pass
+        else:
+            if count >= 3:
+                alert_embed = discord.Embed(
+                    title="⚠️ Alerte Sanction",
+                    description=f"Le membre {member.mention} a atteint **{count}** avertissements.",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=alert_embed)
 
     @commands.command(name="clearwarnings")
     @commands.has_permissions(manage_messages=True)

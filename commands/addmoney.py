@@ -26,6 +26,17 @@ class Addmoney(commands.Cog):
                 description="❌ Argument invalide. Usage : `+addmoney @membre montant`",
                 color=discord.Color.red()
             ))
+        elif isinstance(error, commands.MissingPermissions):
+            await ctx.send(embed=discord.Embed(
+                description="❌ Tu n'as pas les permissions nécessaires (Administrateur) pour cette commande.",
+                color=discord.Color.red()
+            ))
+        elif isinstance(error, commands.CheckFailure):
+            # The user might hit the custom permissions check or global check
+            await ctx.send(embed=discord.Embed(
+                description="❌ Tu n'as pas l'autorisation d'utiliser cette commande.",
+                color=discord.Color.red()
+            ))
         else:
             await ctx.send(embed=discord.Embed(
                 description=f"❌ Une erreur est survenue : {error}",

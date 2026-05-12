@@ -132,15 +132,6 @@ class BlackjackView(discord.ui.View):
 
         await self.end_game(interaction, result, gain)
 
-    @discord.ui.button(label="Abandon", style=discord.ButtonStyle.gray)
-    async def surrender(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.done:
-            await interaction.response.send_message("La partie est terminée.", ephemeral=True)
-            return
-
-        gain = -self.bet // 2
-        await self.end_game(interaction, "Vous avez abandonné la partie. Vous perdez la moitié de votre mise.", gain)
-
 
 class Blackjack(commands.Cog):
     def __init__(self, bot):
