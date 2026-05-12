@@ -252,19 +252,23 @@ class Moderation(commands.Cog):
 
     @commands.command(name="lock")
     @commands.has_permissions(manage_channels=True)
-    async def lock(self, ctx):
-        """Verrouille le salon actuel"""
-        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-        await ctx.send("🔒 Ce salon est maintenant verrouillé.")
+    async def lock(self, ctx, channel: discord.TextChannel = None):
+        """Verrouille un salon (ou le salon actuel par défaut)"""
+        channel = channel or ctx.channel
+        overwrite = channel.overwrites_for(ctx.guild.default_role)
+        overwrite.send_messages = False
+        await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+        await ctx.send(f"🔒 Le salon {channel.mention} est maintenant verrouillé.")
 
     @commands.command(name="unlock")
     @commands.has_permissions(manage_channels=True)
-    async def unlock(self, ctx):
-        """Déverrouille le salon actuel"""
-        overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
+    async def unlock(self, ctx, channel: discord.TextChannel = None):
+        """Déverrouille un salon (ou le salon actuel par défaut)"""
+        channel = channel or ctx.channel
+        overwrite = channel.overwrites_for(ctx.guild.default_role)
         overwrite.send_messages = None
-        await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
-        await ctx.send("🔓 Ce salon est maintenant déverrouillé.")
+        await channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
+        await ctx.send(f"🔓 Le salon {channel.mention} est maintenant déverrouillé.")
 
     @commands.command(name="slowmode")
     @commands.has_permissions(manage_channels=True)
