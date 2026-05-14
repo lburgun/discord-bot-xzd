@@ -119,6 +119,9 @@ class HelpSelect(ui.Select):
             embed.title = "⚙️ Configuration & Utilitaires"
             embed.description = (
                 "`+config_automod` : Gérer l'anti-spam, anti-invite et mots interdits\n"
+                "`+config_welcome <salon> <message>` : Configurer le message de bienvenue\n"
+                "`+config_welcome_image <url>` : Définir l'image de bienvenue\n"
+                "`+config_leave <salon> <message>` : Configurer le message d'au revoir\n"
                 "`+badwords_list` : Voir la liste des mots interdits\n"
                 "`+add_badword <mot>` : Ajouter un mot à la liste noire\n"
                 "`+remove_badword <mot>` : Retirer un mot de la liste noire\n"

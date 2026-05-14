@@ -175,20 +175,20 @@ class ConfigRoles(commands.Cog):
         )
         await ctx.reply(embed=embed, view=view)
 
-    @commands.command(name="setup_welcome")
-    async def setup_welcome(self, ctx, channel: Union[discord.TextChannel, discord.Thread], *, message: str):
+    @commands.command(name="config_welcome")
+    async def config_welcome(self, ctx, channel: Union[discord.TextChannel, discord.Thread], *, message: str):
         """Configure le message de bienvenue. Utilisez {user} pour mentionner le joueur."""
         update_config(ctx.guild.id, welcome_channel_id=channel.id, welcome_message=message)
         await ctx.send(embed=discord.Embed(title="✅ Bienvenue configuré", description=f"Salon: {channel.mention}\nMessage: {message}", color=0x2b2d31))
 
-    @commands.command(name="setup_welcome_image")
-    async def setup_welcome_image(self, ctx, url: str):
+    @commands.command(name="config_welcome_image")
+    async def config_welcome_image(self, ctx, url: str):
         """Définit l'image de l'embed de bienvenue."""
         update_config(ctx.guild.id, welcome_image_url=url)
         await ctx.send(f"✅ Image de bienvenue mise à jour.")
 
-    @commands.command(name="setup_leave")
-    async def setup_leave(self, ctx, channel: Union[discord.TextChannel, discord.Thread], *, message: str):
+    @commands.command(name="config_leave")
+    async def config_leave(self, ctx, channel: Union[discord.TextChannel, discord.Thread], *, message: str):
         """Configure le message d'au revoir. Utilisez {user} pour le nom du joueur."""
         update_config(ctx.guild.id, leave_channel_id=channel.id, leave_message=message)
         await ctx.send(embed=discord.Embed(title="✅ Au revoir configuré", description=f"Salon: {channel.mention}\nMessage: {message}", color=0x2b2d31))
