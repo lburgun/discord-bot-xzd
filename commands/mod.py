@@ -168,7 +168,7 @@ class Moderation(commands.Cog):
 
     @commands.command(name="warn")
     @commands.has_permissions(manage_messages=True)
-    async def warn(self, ctx, member: discord.Member, *, reason: str):
+    async def warn(self, ctx, member: discord.Member, *, reason: str = "Aucune raison fournie"):
         if not await self.check_hierarchy(ctx, member):
             return
             
