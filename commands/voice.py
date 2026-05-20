@@ -17,14 +17,26 @@ class Voice(commands.Cog):
         trigger_id = int(config["voice_trigger_id"])
 
         if after.channel and after.channel.id == trigger_id:
-            category = after.channel.category
+            trigger_channel = after.channel
+            category = trigger_channel.category
+            
+            # Hériter des permissions de la catégorie
+            overwrites = category.overwrites.copy() if category else {}
+            
+            # Ajouter les permissions spécifiques pour le créateur
+            overwrites[member] = discord.PermissionOverwrite(
+                manage_channels=True, 
+                move_members=True, 
+                connect=True, 
+                manage_messages=True
+            )
+
             new_channel = await member.guild.create_voice_channel(
                 name=f"🔊 Salon de {member.name}",
                 category=category,
-                overwrites={
-                    member.guild.default_role: discord.PermissionOverwrite(connect=True),
-                    member: discord.PermissionOverwrite(manage_channels=True, move_members=True, connect=True, manage_messages=True)
-                }
+                overwrites=overwrites,
+                bitrate=trigger_channel.bitrate,
+                user_limit=trigger_channel.user_limit
             )
             await member.move_to(new_channel)
             self.temp_channels[new_channel.id] = member.id
@@ -51,7 +63,7 @@ class Voice(commands.Cog):
 
     @commands.command(name="vc_unlock")
     async def vc_unlock(self, ctx):
-        """Déverrouille ton salon vocal"""
+        """Déverrouille ton salon vocal (réinitialise selon la catégorie)"""
         if not ctx.author.voice or ctx.author.voice.channel.id not in self.temp_channels:
             return await ctx.reply("❌ Tu dois être dans ton salon vocal temporaire !")
         
@@ -59,8 +71,10 @@ class Voice(commands.Cog):
         if self.temp_channels[channel.id] != ctx.author.id:
             return await ctx.reply("❌ Tu n'es pas le propriétaire de ce salon !")
 
-        await channel.set_permissions(ctx.guild.default_role, connect=True)
-        await ctx.reply("🔓 Salon ouvert à tous !")
+        # Supprimer l'overwrite spécifique du salon pour @everyone
+        # Ainsi, il réhérite directement des permissions de la catégorie
+        await channel.set_permissions(ctx.guild.default_role, overwrite=None)
+        await ctx.reply("🔓 Salon déverrouillé ! (Permissions de la catégorie rétablies)")
 
 async def setup(bot):
     await bot.add_cog(Voice(bot))
