@@ -71,9 +71,9 @@ class Voice(commands.Cog):
         if self.temp_channels[channel.id] != ctx.author.id:
             return await ctx.reply("❌ Tu n'es pas le propriétaire de ce salon !")
 
-        # Supprimer l'overwrite spécifique du salon pour @everyone
-        # Ainsi, il réhérite directement des permissions de la catégorie
-        await channel.set_permissions(ctx.guild.default_role, overwrite=None)
+        # Réinitialiser uniquement la permission 'connect' pour @everyone
+        # Cela garde intactes les autres permissions de l'overwrite (ex: view_channel=False)
+        await channel.set_permissions(ctx.guild.default_role, connect=None)
         await ctx.reply("🔓 Salon déverrouillé ! (Permissions de la catégorie rétablies)")
 
 async def setup(bot):
