@@ -25,5 +25,5 @@ Made by **Burgun Leo**
 
 1. **Cloner le projet :**
    ```bash
-   git clone [https://github.com/ton-username/ton-repo.git](https://github.com/ton-username/ton-repo.git)
+   git clone [https://github.com/lburgun/discord-bot-xzd](https://github.com/lburgun/discord-bot-xzd)
    cd ton-repo
