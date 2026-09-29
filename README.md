@@ -18,6 +18,7 @@ Made by **Burgun Leo**
 
 * **Python** (3.10 ou supérieur)
 * Un token de bot récupéré sur le [Discord Developer Portal](https://discord.com/developers/applications)
+* un fichier.env avec le token et le cle api pour votre bade de donnée
 
 ---
 
