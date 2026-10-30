@@ -121,49 +121,68 @@ class Moderation(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    
     @commands.command(name="clear")
     @commands.has_permissions(manage_messages=True)
+    @commands.max_concurrency(
+        1, per=commands.BucketType.channel, wait=False
+    )
     async def clear(self, ctx, amount: int = 10):
-        if amount < 1 or amount > 100:
-            return await ctx.send("❌ Merci de préciser un nombre entre 1 et 100.", delete_after=5)
-
-        embed_loading = discord.Embed(
-            description="🧹 Suppression en cours...",
-            color=0x2b2d31
+        if not 1 <= amount <= 100:
+            return await ctx.send(
+                "❌ Choisis un nombre entre 1 et 100.",
+                delete_after=5
+            )
+    
+        status = await ctx.send(
+            embed=discord.Embed(
+                description="🧹 Suppression en cours...",
+                color=0x2b2d31
+            )
         )
-        status_msg = await ctx.send(embed=embed_loading)
+    
+        try:
+            deleted = await ctx.channel.purge(
+                limit=amount + 1,
+                before=status,
+                check=lambda m: m.id != ctx.message.id,
+                bulk=True,
+                reason=f"Clear par {ctx.author} ({amount})"
+            )
+    
+            # Supprime aussi la commande !clear
+            try:
+                await ctx.message.delete()
+            except discord.HTTPException:
+                pass
+    
+            await status.edit(
+                embed=discord.Embed(
+                    description=(
+                        f"✅ **{len(deleted)}** messages supprimés."
+                    ),
+                    color=0x2b2d31
+                )
+            )
+    
+        except discord.Forbidden:
+            await status.edit(
+                content="❌ Permissions insuffisantes.",
+                embed=None
+            )
+    
+        except discord.HTTPException:
+            await status.edit(
+                content="❌ Erreur pendant la suppression.",
+                embed=None
+            )
+    
+        finally:
+            try:
+                await status.delete(delay=5)
+            except discord.HTTPException:
+                pass
 
-        now = discord.utils.utcnow()
-
-        # 🔹 Étape 1 : suppression rapide (<14 jours)
-        def is_recent(msg):
-            return (now - msg.created_at).days < 14
-
-        recent_deleted = await ctx.channel.purge(
-            limit=amount + 1,
-            check=is_recent,
-            bulk=True
-        )
-
-        # 🔹 Étape 2 : suppression lente (>14 jours)
-        old_deleted_count = 0
-        async for msg in ctx.channel.history(limit=amount + 20):
-            if (now - msg.created_at).days >= 14:
-                try:
-                    await msg.delete()
-                    old_deleted_count += 1
-                except:
-                    pass
-
-        total_deleted = (len(recent_deleted) - 1) + old_deleted_count
-
-        embed_done = discord.Embed(
-            description=f"✅ **{total_deleted}** messages supprimés.",
-            color=0x2b2d31
-        )
-
-        await status_msg.edit(embed=embed_done)
-        await status_msg.delete(delay=5)
 
 
 async def setup(bot):
